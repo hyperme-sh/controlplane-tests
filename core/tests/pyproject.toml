@@ -37,11 +37,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-# Coverage applies to shared contracts only (not the whole monorepo). Target: >80% on those packages.
+# Coverage applies to shared contracts only (not the whole monorepo). Target: >=85% on those packages.
 # Integration tests using Testcontainers require Docker; set SKIP_TESTCONTAINERS=1 to skip them (e.g. sandboxed CI).
 addopts = [
     "--cov=panopticon_models",
     "--cov=controlplane_events.payloads",
     "--cov-report=term-missing",
-    "--cov-fail-under=80",
+    "--cov-fail-under=85",
 ]
