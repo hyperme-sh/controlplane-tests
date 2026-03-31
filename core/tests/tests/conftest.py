@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
@@ -49,6 +49,31 @@ def postgres_sync_url(postgres_container: PostgresContainer) -> str:
 def migrated_postgres(postgres_sync_url: str) -> str:
     run_alembic_upgrade(postgres_sync_url)
     return postgres_sync_url
+
+
+@pytest.fixture(scope="session")
+def rls_isolation_role_ready(migrated_postgres: str) -> None:
+    """Create a role without BYPASSRLS so RLS is enforced (superuser bypasses RLS).
+
+    Tests that assert tenant isolation ``SET ROLE`` to this role after granting
+    ``SELECT`` on the table under test.
+    """
+    role = "panopticon_rls_tester"
+    eng = create_engine(migrated_postgres)
+    with eng.begin() as cx:
+        cx.execute(
+            text(
+                f"""
+                DO $$ BEGIN
+                    CREATE ROLE {role} NOINHERIT NOBYPASSRLS;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+                """
+            )
+        )
+        cx.execute(text(f"GRANT SELECT ON billing_records TO {role}"))
+        cx.execute(text(f"GRANT {role} TO CURRENT_USER"))
 
 
 @pytest.fixture(scope="session")
