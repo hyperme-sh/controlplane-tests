@@ -24,6 +24,7 @@ dependencies = [
     "pytest-asyncio>=1.2.0",
     "aiokafka>=0.12.0",
     "testcontainers>=4.9.0",
+    "gateway",
 ]
 
 [tool.uv.sources]
@@ -37,6 +38,7 @@ controlplane-core = { workspace = true }
 controlplane-db = { workspace = true }
 controlplane-events = { workspace = true }
 panopticon-models = { workspace = true }
+gateway = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/panopticon_e2e"]
@@ -51,6 +53,7 @@ markers = [
 testpaths = ["tests"]
 pythonpath = [
     "src",
+    "../../gateway/src",
     "../user-service/src",
     "../acl-service/src",
     "../payment-service/src",
