@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
+from panopticon_tests.fixtures.kafka import await_kafka_controller_ready
 from panopticon_tests.fixtures.postgres import (
     async_db_url,
     normalize_sync_sqlalchemy_url,
@@ -138,6 +139,7 @@ async def kafka_topic_created(kafka_bootstrap: str):
 
     admin = AIOKafkaAdminClient(bootstrap_servers=kafka_bootstrap)
     await admin.start()
+    await await_kafka_controller_ready(admin)
     try:
         await admin.create_topics(
             [NewTopic(name=CONTROLPLANE_EVENTS_V1, num_partitions=1, replication_factor=1)]
