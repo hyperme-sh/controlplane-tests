@@ -45,6 +45,9 @@ packages = ["src/panopticon_e2e"]
 include = ["src/panopticon_e2e"]
 
 [tool.pytest.ini_options]
+markers = [
+    "phase2_step2: Phase 2 Step 2 REST cross-service flow (listing → purchase → AI inference)",
+]
 testpaths = ["tests"]
 pythonpath = [
     "src",

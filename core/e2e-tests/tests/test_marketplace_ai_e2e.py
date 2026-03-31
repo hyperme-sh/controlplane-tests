@@ -25,6 +25,7 @@ from ai_service.infrastructure.kafka_consumers import build_ai_event_consumers
 
 
 @pytest.mark.integration
+@pytest.mark.phase2_step2
 @pytest.mark.asyncio
 async def test_free_agent_listing_purchase_entitles_inference(
     migrated_postgres: str,
