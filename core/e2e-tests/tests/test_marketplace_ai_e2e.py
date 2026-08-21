@@ -103,6 +103,7 @@ async def test_free_agent_listing_purchase_entitles_inference(
                 pr = await mcli.post(
                     f"/api/v1/marketplace/listings/{lid}/purchase",
                     headers=headers,
+                    json={},
                 )
                 assert pr.status_code == 201, pr.text
                 pur = pr.json()
