@@ -59,7 +59,7 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
             sub="11111111-1111-1111-1111-111111111111",
             email="e2e@example.com",
             tenant_id=ta,
-            roles=[],
+            roles=["admin"],
             scopes=[],
         )
 
