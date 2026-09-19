@@ -176,3 +176,32 @@ def test_every_pulled_image_is_one_ci_builds() -> None:
         + ", ".join(missing)
         + f" (built: {', '.join(sorted(built))})"
     )
+
+
+def test_deploy_pointer_moves_only_after_the_fleet_is_verified() -> None:
+    """``deploy/test`` is the whole deploy decision, so it must trail the proof.
+
+    The VM checks out that ref and pins its images to the sha it names. Moving
+    the advance ahead of the check that every image resolves would hand the VM
+    a sha whose images are still building, which is the pull failure the pin
+    was meant to end.
+    """
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ghcr-test.yml").read_text()
+    )
+    steps = [
+        step.get("name") or step.get("uses", "")
+        for step in workflow["jobs"]["deployable"]["steps"]
+    ]
+
+    advance = "Advance deploy/test to this sha"
+    verified = "Every compose image resolves at this sha"
+    assert advance in steps, f"{advance!r} is gone, so nothing tells the VM what to run"
+    assert steps.index(verified) < steps.index(advance), (
+        f"{advance!r} runs before {verified!r}"
+    )
+    assert steps[-1] == advance, (
+        "the pointer must be the last thing this job does so every check gates "
+        f"it, but the last step is {steps[-1]!r}"
+    )
