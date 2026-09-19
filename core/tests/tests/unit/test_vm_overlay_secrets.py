@@ -92,7 +92,7 @@ def test_required_secret_reaches_every_service(
 def test_shared_secret_is_required_on_every_api_service(overlay: dict, name: str) -> None:
     """Anchored into x-vm-api-env so mint and verify sides cannot drift."""
 
-    for service in ("gateway", "payment-service", "hypermesh-service", "hypermesh-router"):
+    for service in ("controlplane-edge", "payment-service", "hypermesh-service", "hypermesh-router"):
         env = _service_env(overlay, service)
         assert name in env, f"{service} does not declare {name}"
         assert f"${{{name}:?" in env[name], f"{service} must require {name}"

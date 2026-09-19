@@ -13,10 +13,10 @@ import respx
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
-from gateway.aggregation import register_aggregation_routes
-from gateway.graphql.register import register_graphql_routes
-from gateway.grpc_server import grpc_server_lifespan
-from gateway.register_cross_cutting import register_gateway_cross_cutting
+from controlplane_edge.aggregation import register_aggregation_routes
+from controlplane_edge.graphql.register import register_graphql_routes
+from controlplane_edge.grpc_server import grpc_server_lifespan
+from controlplane_edge.register_cross_cutting import register_gateway_cross_cutting
 
 _PROTO = Path(__file__).resolve().parents[3] / "proto" / "panopticon" / "v1"
 if str(_PROTO) not in sys.path:
@@ -44,8 +44,8 @@ async def test_rest_graphql_and_grpc_through_gateway_stack(
 
     monkeypatch.setattr(api_config.settings, "keycloak_jwks_url", None)
     monkeypatch.setattr(api_config.settings, "keycloak_issuer", None)
-    monkeypatch.setenv("GATEWAY_AUTH_SERVICE_URL", "http://auth.e2e.test")
-    monkeypatch.setenv("GATEWAY_USER_SERVICE_URL", "http://user.e2e.test")
+    monkeypatch.setenv("CPEDGE_AUTH_SERVICE_URL", "http://auth.e2e.test")
+    monkeypatch.setenv("CPEDGE_USER_SERVICE_URL", "http://user.e2e.test")
 
     app = FastAPI()
     register_gateway_cross_cutting(app)

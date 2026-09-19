@@ -28,10 +28,10 @@ def test_user_created_wrap_envelope_json_serializable():
         email="wrap@example.com",
         tenant_id=str(tid),
     )
-    env = ev.wrap_envelope(service="gateway", tenant_uuid=tid)
+    env = ev.wrap_envelope(service="controlplane-edge", tenant_uuid=tid)
     assert isinstance(env, ControlPlaneEventEnvelope)
     assert env.event_type == "user.created.v1"
-    assert env.service == "gateway"
+    assert env.service == "controlplane-edge"
     assert env.tenant_id == tid
     blob = env.model_dump(mode="json")
     s = json.dumps(blob)
