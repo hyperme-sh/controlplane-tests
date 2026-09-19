@@ -9,6 +9,7 @@ provisioned from Key Vault, dropped at the container boundary, and surfaced as
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,35 @@ def test_env_example_lists_every_required_name(name: str) -> None:
         if "=" in line and not line.lstrip().startswith("#")
     }
     assert name in declared, f"{name} is required but absent from {ENV_EXAMPLE.name}"
+
+
+def test_every_pulled_image_is_one_ci_builds() -> None:
+    """A pull name CI never pushes silently pins the VM to a stale image.
+
+    The overlay pulls by name and never builds, so renaming a service without
+    renaming its ``image:`` is invisible: compose keeps pulling the old
+    repository, which still exists and still has a ``:test`` tag, so the pull
+    succeeds and the plane quietly runs pre-rename code. That is what
+    ``ghcr.io/fyberlabs/gateway`` did after the service became
+    ``controlplane-edge``.
+    """
+
+    overlay = yaml.load(VM_OVERLAY.read_text(), Loader=_ComposeLoader)
+    pulled = {
+        image.split("/")[-1].split(":", 1)[0]
+        for service in overlay["services"].values()
+        if isinstance(service, dict) and (image := service.get("image", ""))
+        if image.startswith("ghcr.io/fyberlabs/")
+    }
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ghcr-test.yml").read_text()
+    # The publish matrix is the dorny/paths-filter block: one 8-space key per
+    # image, each with its own path globs.
+    built = set(re.findall(r"^ {12}([a-z][a-z0-9-]*):$", workflow, re.M))
+
+    missing = sorted(pulled - built)
+    assert not missing, (
+        "the VM overlay pulls images ghcr-test.yml never builds: "
+        + ", ".join(missing)
+        + f" (built: {', '.join(sorted(built))})"
+    )
