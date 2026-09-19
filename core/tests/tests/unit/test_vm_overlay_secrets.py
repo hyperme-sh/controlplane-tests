@@ -205,3 +205,16 @@ def test_deploy_pointer_moves_only_after_the_fleet_is_verified() -> None:
         "the pointer must be the last thing this job does so every check gates "
         f"it, but the last step is {steps[-1]!r}"
     )
+
+    # The first run has no branch to move, and asking the API to update a ref
+    # that does not exist answers 422, not the 404 a status-code guess expects.
+    # That left deploy/test uncreated and the gate red.
+    advance_run = next(
+        step["run"]
+        for step in workflow["jobs"]["deployable"]["steps"]
+        if step.get("name") == advance
+    )
+    assert "-X POST" in advance_run and "-X PATCH" in advance_run, (
+        "the step has to create deploy/test as well as move it -- on the first "
+        "run there is nothing to move"
+    )
