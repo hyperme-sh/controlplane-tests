@@ -21,8 +21,8 @@ ENV_EXAMPLE = REPO_ROOT / ".env.vm.example"
 # Credential -> services that must receive it. Signing keys are symmetric, so
 # both the signer and the verifier need the same value.
 REQUIRED_BY_SERVICE: dict[str, tuple[str, ...]] = {
-    "HYPERMESH_TICKET_HMAC_KEY": ("hypermesh-service", "hypermesh-router"),
-    "HYPERMESH_ROUTER_SERVICE_SECRET": ("hypermesh-service", "hypermesh-router"),
+    "HYPERMESH_TICKET_HMAC_KEY": ("hypermesh-service", "hypermesh-gateway"),
+    "HYPERMESH_GATEWAY_SERVICE_SECRET": ("hypermesh-service", "hypermesh-gateway"),
     "TURN_AUTH_SECRET": ("turn-service",),
 }
 
@@ -92,7 +92,7 @@ def test_required_secret_reaches_every_service(
 def test_shared_secret_is_required_on_every_api_service(overlay: dict, name: str) -> None:
     """Anchored into x-vm-api-env so mint and verify sides cannot drift."""
 
-    for service in ("controlplane-edge", "payment-service", "hypermesh-service", "hypermesh-router"):
+    for service in ("controlplane-edge", "payment-service", "hypermesh-service", "hypermesh-gateway"):
         env = _service_env(overlay, service)
         assert name in env, f"{service} does not declare {name}"
         assert f"${{{name}:?" in env[name], f"{service} must require {name}"
