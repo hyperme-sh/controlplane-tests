@@ -181,8 +181,13 @@ def test_upgrade_is_idempotent(legacy_database: str) -> None:
 
 
 def test_rename_is_a_noop_on_a_fresh_database(fresh_database: str) -> None:
-    """Fresh databases get the new names from 0012, so 0023 must not fight it."""
+    """Fresh databases get the new names from 0012, so 0023 must not fight it.
 
+    Snapshot at 0023, not head: later revisions (lease audit, …) are not
+    part of the rename and must not make this comparison fail.
+    """
+
+    _downgrade(fresh_database, _RENAME_REVISION)
     before = _shape(fresh_database)
     _downgrade(fresh_database, "0022_host_cert_override")
     _upgrade(fresh_database, _RENAME_REVISION)
