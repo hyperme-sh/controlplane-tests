@@ -41,6 +41,17 @@ async def test_free_agent_listing_purchase_entitles_inference(
     monkeypatch.setattr(api_config.settings, "acl_service_base_url", None)
     monkeypatch.setattr(api_config.settings, "ai_rate_limit_per_minute", 500)
 
+    from ai_service.interfaces.api import routes as ai_routes
+    from marketplace_service.interfaces.api import routes as mkt_routes
+
+    async def _acl_allow(*_a: object, **_k: object) -> bool:
+        return True
+
+    monkeypatch.setattr(mkt_routes, "enforce_rbac_http", _acl_allow)
+    monkeypatch.setattr(mkt_routes, "enforce_acl_http", _acl_allow)
+    monkeypatch.setattr(ai_routes, "enforce_rbac_http", _acl_allow)
+    monkeypatch.setattr(ai_routes, "enforce_acl_http", _acl_allow)
+
     ta = uuid.uuid4()
     actor_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
     eng = create_engine(migrated_postgres)
