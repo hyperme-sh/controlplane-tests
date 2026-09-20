@@ -218,3 +218,50 @@ def test_deploy_pointer_moves_only_after_the_fleet_is_verified() -> None:
         "the step has to create deploy/test as well as move it -- on the first "
         "run there is nothing to move"
     )
+
+
+def _app_services(overlay: dict) -> dict[str, dict]:
+    """Services running one of our images, i.e. the ones we can crash."""
+
+    return {
+        name: cfg
+        for name, cfg in overlay["services"].items()
+        if "ghcr.io/fyberlabs" in str((cfg or {}).get("image", ""))
+    }
+
+
+def test_every_app_service_restarts(overlay: dict) -> None:
+    """A service that exits must not stay down silently.
+
+    hypermesh-service exited on a bad schema and sat dead for fourteen hours
+    while the other twenty containers reported healthy, because a restart policy
+    is set on postgres/redis/kafka/keycloak and on nothing else. The VM is
+    unattended, so "it stopped" has to become visible or self-correcting.
+    """
+
+    app = _app_services(overlay)
+    assert len(app) >= 15, f"only found {len(app)} app services, the scan is wrong"
+
+    missing = sorted(n for n, c in app.items() if c.get("restart") != "unless-stopped")
+    assert not missing, f"no restart policy on: {', '.join(missing)}"
+
+
+def test_every_app_service_is_capped(overlay: dict) -> None:
+    """One service must not be able to take the box with it.
+
+    The box has no swap, so exhaustion is a hang: at 245 MiB available nothing
+    could fork, and sshd and the Azure guest agent both stopped answering, which
+    is a VM that cannot be recovered in band or out of band.
+    """
+
+    uncapped = sorted(n for n, c in _app_services(overlay).items() if not c.get("mem_limit"))
+    assert not uncapped, f"no mem_limit on: {', '.join(uncapped)}"
+
+    # The JVMs are the two largest and are container-aware, so the cap also caps
+    # their heap. Postgres is deliberately uncapped: page cache counts against a
+    # cgroup, so a limit there caps caching and vacuum dies first.
+    for name in ("kafka", "keycloak"):
+        assert overlay["services"][name].get("mem_limit"), f"{name} is uncapped"
+    assert not overlay["services"]["postgres"].get("mem_limit"), (
+        "capping Postgres limits how much of the database it may cache"
+    )
