@@ -33,6 +33,7 @@ REQUIRED_IN_SHARED_ANCHOR = (
     "API_KEY_EXCHANGE_JWT_SECRET",
     "HYPERMESH_INTERNAL_TOKEN",
     "PAYMENT_INTERNAL_TOKEN",
+    "AIUDITOR_INTERNAL_TOKEN",
 )
 
 # Optional at boot, but must still be declared or payment-service cannot see them.
