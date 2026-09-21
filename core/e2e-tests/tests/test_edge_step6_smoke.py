@@ -59,10 +59,9 @@ async def test_rest_graphql_and_grpc_through_gateway_stack(
         )
     )
     tid = str(uuid.uuid4())
-    grpc_port = 50560
 
     transport = httpx.ASGITransport(app=app)
-    async with grpc_server_lifespan(host="127.0.0.1", port=grpc_port, enabled=True):
+    async with grpc_server_lifespan(host="127.0.0.1", port=0, enabled=True) as server:
         async with LifespanManager(app):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 r = await client.get("/v1/openapi.json")
@@ -77,7 +76,8 @@ async def test_rest_graphql_and_grpc_through_gateway_stack(
                 )
                 assert g.status_code == 200
 
-            async with grpc.aio.insecure_channel(f"127.0.0.1:{grpc_port}") as channel:
+            assert server is not None
+            async with grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}") as channel:
                 stub = contractecho_pb2_grpc.ContractEchoStub(channel)
                 req = contractecho_pb2.UserWire(id=str(uuid.uuid4()), email="a@b.com", display_name="x")
                 out = await stub.EchoUser(
