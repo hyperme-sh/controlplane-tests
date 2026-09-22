@@ -20,6 +20,7 @@ _TABLES = {
     "aiuditor_envelopes",
     "aiuditor_suite_members",
     "aiuditor_admissions",
+    "aiuditor_candidates",
 }
 
 
