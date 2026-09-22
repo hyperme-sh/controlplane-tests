@@ -17,6 +17,9 @@ _TABLES = {
     "aiuditor_contracts",
     "aiuditor_violations",
     "aiuditor_catalog",
+    "aiuditor_envelopes",
+    "aiuditor_suite_members",
+    "aiuditor_admissions",
 }
 
 
