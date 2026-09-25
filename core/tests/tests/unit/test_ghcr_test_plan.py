@@ -500,6 +500,16 @@ exit 1
     return completed.returncode != 0
 
 
+def _quiet_grep_can_miss(built: list[str], service: str, *, attempts: int = 40) -> bool:
+    """True when the old check loses the match at least once.
+
+    Past the pipe buffer, bash still reports 0 or 141 for the same payload.
+    One miss is the bug the carry step used to ship.
+    """
+
+    return any(_quiet_grep_pipe_misses(built, service) for _ in range(attempts))
+
+
 def _built_list_that_sigpipes(service: str) -> list[str]:
     # Just past a 64KiB pipe, and under the 128KiB single-argument limit so
     # the same list can be passed to the carry script in BUILT.
@@ -507,7 +517,7 @@ def _built_list_that_sigpipes(service: str) -> list[str]:
     encoded = json.dumps(built)
     if len(encoded) >= 120_000:
         raise AssertionError(f"BUILT payload is {len(encoded)} bytes")
-    if not _quiet_grep_pipe_misses(built, service):
+    if not _quiet_grep_can_miss(built, service):
         raise AssertionError(f"payload did not make quiet grep fail under pipefail for {service}")
     return built
 
@@ -572,7 +582,7 @@ def test_carry_keeps_a_built_image_when_quiet_grep_would_sigpipe(tmp_path: Path)
 
     service = "marketplace"
     built = [*_built_list_that_sigpipes(service), "ai-service"]
-    assert _quiet_grep_pipe_misses(built, service)
+    assert _quiet_grep_can_miss(built, service)
 
     docker_log = tmp_path / "docker.log"
     bin_dir = tmp_path / "bin"
