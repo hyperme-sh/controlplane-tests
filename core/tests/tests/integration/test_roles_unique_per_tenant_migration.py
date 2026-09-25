@@ -1,4 +1,4 @@
-"""0041 dedupes role names inside one tenant scope and adds partial unique indexes.
+"""0042 dedupes role names inside one tenant scope and adds partial unique indexes.
 
 NULL tenant is its own scope. A tenant-scoped "user" row is not the platform
 "user" row. Same-scope duplicates keep the oldest created_at, then id.
@@ -22,8 +22,8 @@ from panopticon_tests.fixtures.postgres import (
 
 pytestmark = pytest.mark.integration
 
-_PARENT = "0040_scorecard_host_version"
-_REV = "0041_roles_unique_per_tenant"
+_PARENT = "0041_fleet_health"
+_REV = "0042_roles_unique_per_tenant"
 _PLATFORM_INDEX = "uq_roles_platform_lower_name"
 _TENANT_INDEX = "uq_roles_tenant_lower_name"
 _MARKETPLACE = "8f8e8d8c-7b6a-4a59-8c3d-2e1f0a9b8c7d"
@@ -133,7 +133,7 @@ def test_clean_database_only_adds_partial_unique_indexes(postgres: str) -> None:
 
 
 def test_cross_scope_user_roles_are_unchanged(postgres: str) -> None:
-    """The pan-test pair is two scopes. 0041 must not merge or delete either."""
+    """The pan-test pair is two scopes. 0042 must not merge or delete either."""
 
     _upgrade(postgres, _PARENT)
     group_id = uuid.uuid4()
