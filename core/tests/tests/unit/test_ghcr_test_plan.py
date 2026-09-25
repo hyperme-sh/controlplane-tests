@@ -541,3 +541,118 @@ def test_write_matrix_cli_forbids_carry_without_a_base(
 
 def test_assert_compose_accepts_the_repo() -> None:
     plan.assert_compose_services(REPO_ROOT)
+
+
+def test_repo_alembic_head_is_revision_0039() -> None:
+    versions = REPO_ROOT / plan.VERSIONS_DIR
+    assert plan.alembic_head.repo_head(versions) == "0039_lab_device_identity"
+
+
+def test_alembic_versions_change_rebuilds_every_bundled_image() -> None:
+    """A versions-directory edit rebuilds every controlplane-db image.
+
+    The path filter in this case only selected hypermesh, which is what #205
+    did. The versions rule still adds edge and the rest of the fleet.
+    """
+
+    prefixes = _prefixes()
+    decided = plan.plan_publish(
+        event_name="push",
+        base_state="ancestor",
+        filter_hits={"shared": "false", "hypermesh-service": "true"},
+        changed_files=[MIGRATION_0039],
+        copy_prefixes=prefixes,
+    )
+    db = plan.db_image_names(prefixes)
+    assert "controlplane-edge" in db
+    assert set(db) <= set(decided.built)
+    assert decided.built == _names()
+
+    only_edge = {
+        "controlplane-edge": ["core/lib/controlplane-db"],
+        "frontend-not-published": ["frontend"],
+    }
+    narrow = plan.plan_publish(
+        images=(
+            ("controlplane-edge", "controlplane-edge/Dockerfile"),
+            ("frontend-not-published", "frontend/Dockerfile"),
+        ),
+        event_name="push",
+        base_state="ancestor",
+        filter_hits={},
+        changed_files=["pkg/alembic/versions/0002_new.py"],
+        copy_prefixes=only_edge,
+    )
+    assert narrow.built == ("controlplane-edge",)
+
+
+def test_alembic_parser_accepts_annotated_roots_and_rejects_two_heads(tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    versions.mkdir()
+    (versions / "0001.py").write_text('revision: str = "0001"\ndown_revision: Union[str, None] = None\n')
+    (versions / "0002.py").write_text('revision = "0002"\ndown_revision = "0001"\n')
+    assert plan.alembic_head.repo_head(versions) == "0002"
+    (versions / "side.py").write_text('revision = "side"\ndown_revision = "0001"\n')
+    with pytest.raises(SystemExit, match="one head"):
+        plan.alembic_head.repo_head(versions)
+
+
+def test_promotion_refuses_a_stale_or_missing_head() -> None:
+    errors = plan.promotion_errors(
+        "0039_lab_device_identity",
+        {
+            "controlplane-edge": "0036_device_wg_pubkey",
+            "auth-service": None,
+            "hypermesh-service": "0039_lab_device_identity",
+        },
+        ["controlplane-edge", "auth-service", "hypermesh-service"],
+    )
+    assert any("controlplane-edge" in error and "0036_device_wg_pubkey" in error for error in errors)
+    assert any("auth-service" in error and "no " in error for error in errors)
+    assert not any(error.startswith("hypermesh-service") for error in errors)
+    assert plan.promotion_errors(
+        "0039_lab_device_identity",
+        {"controlplane-edge": "0039_lab_device_identity"},
+        ["controlplane-edge"],
+    ) == []
+
+
+def test_manifest_label_comes_from_the_image_config() -> None:
+    single = {
+        "config": {"digest": "sha256:config", "mediaType": "application/vnd.oci.image.config.v1+json"}
+    }
+    assert plan.manifest_target(single) == ("config", "sha256:config")
+    index = {
+        "manifests": [
+            {"digest": "sha256:arm", "platform": {"os": "linux", "architecture": "arm64"}},
+            {"digest": "sha256:amd", "platform": {"os": "linux", "architecture": "amd64"}},
+        ]
+    }
+    assert plan.manifest_target(index) == ("manifest", "sha256:amd")
+    assert (
+        plan.label_from_config(
+            {"config": {"Labels": {plan.alembic_head.ALEMBIC_LABEL: "0039_lab_device_identity"}}},
+            plan.alembic_head.ALEMBIC_LABEL,
+        )
+        == "0039_lab_device_identity"
+    )
+    assert plan.label_from_config({"config": {"Labels": {}}}, plan.alembic_head.ALEMBIC_LABEL) is None
+
+
+def test_test_tag_is_not_pushed_before_the_head_check() -> None:
+    workflow = _workflow()
+    build = next(
+        step
+        for step in workflow["jobs"]["publish"]["steps"]
+        if str(step.get("uses", "")).startswith("docker/build-push-action")
+    )
+    assert ":test" not in build["with"]["tags"]
+    assert "ALEMBIC_HEAD" in build["with"]["build-args"]
+    names = [step.get("name") or "" for step in workflow["jobs"]["deployable"]["steps"]]
+    check = names.index("Alembic head matches the repo before promotion")
+    carry = names.index("Carry unchanged images to this sha")
+    promote = names.index("Promote images to test")
+    advance = names.index("Advance deploy/test to this sha")
+    assert check < carry < promote < advance
+    assert "check-heads" in workflow["jobs"]["deployable"]["steps"][check]["run"]
+    assert "imagetools create" in workflow["jobs"]["deployable"]["steps"][promote]["run"]
