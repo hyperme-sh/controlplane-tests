@@ -25,7 +25,6 @@ REQUIRED_BY_SERVICE: dict[str, tuple[str, ...]] = {
     "HYPERMESH_TICKET_HMAC_KEY": ("hypermesh-service", "hypermesh-gateway"),
     "HYPERMESH_GATEWAY_SERVICE_SECRET": ("hypermesh-service", "hypermesh-gateway"),
     "TURN_AUTH_SECRET": ("turn-service",),
-    "PRICING_SERVICE_TOKEN": ("hypermesh-service", "hypermesh-pricing"),
 }
 
 # Shared secrets that must be identical across every service that speaks them.
@@ -111,6 +110,54 @@ def test_optional_secret_is_still_declared(
     env = _service_env(overlay, service)
     for name in names:
         assert name in env, f"{service} does not declare {name}"
+
+
+def test_pricing_service_token_is_passed_through_without_a_literal_default(overlay: dict) -> None:
+    """infra#135 treats the KV secret as optional. ``:?`` would fail the whole plane."""
+
+    for service in ("hypermesh-service", "hypermesh-pricing"):
+        env = _service_env(overlay, service)
+        assert env.get("PRICING_SERVICE_TOKEN") == "${PRICING_SERVICE_TOKEN:-}", (
+            f"{service} must pass PRICING_SERVICE_TOKEN through with an empty fallback"
+        )
+    depends = overlay["services"]["hypermesh-service"].get("depends_on") or {}
+    if isinstance(depends, dict):
+        pricing = depends.get("hypermesh-pricing")
+        assert pricing is None or pricing.get("condition") != "service_healthy"
+    else:
+        assert "hypermesh-pricing" not in depends
+
+
+def test_base_compose_does_not_wait_for_pricing_health() -> None:
+    base = yaml.load((REPO_ROOT / "docker-compose.yaml").read_text(), Loader=_ComposeLoader)
+    service = base["services"]["hypermesh-service"]
+    depends = service.get("depends_on") or {}
+    assert "hypermesh-pricing" not in depends
+    assert base["services"]["hypermesh-pricing"].get("profiles") == ["pricing"]
+
+
+_DIGEST_IMAGE = re.compile(r"^ghcr\.io/fyberlabs/hypermesh-pricing@sha256:[0-9a-f]{64}$")
+
+
+def test_pricing_image_must_be_a_digest() -> None:
+    """A tag such as ``:v0.1.1`` or ``:test`` is not a pin. The real digest lands here."""
+
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing:v0.1.1") is None
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing:test") is None
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing@sha256:abcd") is None
+    for path in (REPO_ROOT / "docker-compose.yaml", VM_OVERLAY):
+        fallbacks = re.findall(r"\$\{HYPERMESH_PRICING_IMAGE:-(.+?)\}", path.read_text())
+        assert fallbacks, f"{path.name} has no HYPERMESH_PRICING_IMAGE default"
+        for image in fallbacks:
+            assert _DIGEST_IMAGE.fullmatch(image), image
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        if not line.startswith("HYPERMESH_PRICING_IMAGE="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value:
+            assert _DIGEST_IMAGE.fullmatch(value), value
+    script = (REPO_ROOT / "scripts" / "compose-vm.sh").read_text()
+    assert "--profile pricing" in script
 
 
 def test_no_secret_defaults_to_a_value_committed_to_git(overlay: dict) -> None:
