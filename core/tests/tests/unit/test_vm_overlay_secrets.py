@@ -231,6 +231,10 @@ def _app_services(overlay: dict) -> dict[str, dict]:
     }
 
 
+# Opt-in jobs (a ``profiles`` key) retry a bounded number of times, then stop.
+_BOUNDED_ON_FAILURE = re.compile(r"^on-failure:([1-9][0-9]*)$")
+
+
 def test_every_app_service_restarts(overlay: dict) -> None:
     """A service that exits must not stay down silently.
 
@@ -238,13 +242,31 @@ def test_every_app_service_restarts(overlay: dict) -> None:
     while the other twenty containers reported healthy, because a restart policy
     is set on postgres/redis/kafka/keycloak and on nothing else. The VM is
     unattended, so "it stopped" has to become visible or self-correcting.
+
+    App services with no ``profiles`` key stay on ``unless-stopped``. A service
+    with ``profiles`` is an opt-in manual job, so it is exempt from that rule.
+    Each of those jobs uses ``restart: on-failure:N`` with N a positive integer,
+    so a failed run stops after a bounded number of attempts.
     """
 
     app = _app_services(overlay)
     assert len(app) >= 15, f"only found {len(app)} app services, the scan is wrong"
 
-    missing = sorted(n for n, c in app.items() if c.get("restart") != "unless-stopped")
+    always_on = {n: c for n, c in app.items() if "profiles" not in c}
+    manual = {n: c for n, c in app.items() if "profiles" in c}
+
+    missing = sorted(n for n, c in always_on.items() if c.get("restart") != "unless-stopped")
     assert not missing, f"no restart policy on: {', '.join(missing)}"
+
+    unbounded = sorted(
+        n
+        for n, c in manual.items()
+        if _BOUNDED_ON_FAILURE.fullmatch(str(c.get("restart") or "")) is None
+    )
+    assert not unbounded, (
+        "profile-gated services need restart on-failure:N with N a positive integer: "
+        + ", ".join(f"{n}={manual[n].get('restart')!r}" for n in unbounded)
+    )
 
 
 def test_every_app_service_is_capped(overlay: dict) -> None:
