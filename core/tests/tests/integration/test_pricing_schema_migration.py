@@ -30,6 +30,7 @@ pytestmark = pytest.mark.integration
 
 _PARENT = "0043_device_host_type"
 _REV = "0044_pricing_schema"
+_HEAD = "0045_lease_failed_at"
 _TENANT = "8f8e8d8c-7b6a-4a59-8c3d-2e1f0a9b8c7d"
 _HASH = "ab" * 32
 _COMMIT = "cd" * 32
@@ -137,12 +138,12 @@ def _insert_round(cx, round_id: str, *, idempotency_key: str, ruleset: str | Non
     )
 
 
-def test_pricing_revision_is_the_only_head() -> None:
+def test_pricing_revision_revises_device_host_type() -> None:
     src = alembic_ini_path().parent / "src"
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     script = ScriptDirectory(str(src / "controlplane_db" / "alembic"))
-    assert script.get_heads() == [_REV]
+    assert len(script.get_heads()) == 1
     revision = script.get_revision(_REV)
     assert revision is not None
     assert revision.down_revision == _PARENT
@@ -239,6 +240,7 @@ def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     assert missing is None
 
     _upgrade(postgres, "head")
-    assert _version(postgres) == _REV
+    assert _version(postgres) == _HEAD
     assert _tables(postgres) == set(_TABLES)
     assert _nullable(postgres, "hypermesh_leases", "ruleset_version") == "YES"
+    assert _nullable(postgres, "hypermesh_leases", "failed_at") == "YES"
