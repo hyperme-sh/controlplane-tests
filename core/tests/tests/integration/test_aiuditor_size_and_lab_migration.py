@@ -69,7 +69,8 @@ def _insert_candidate(url: str, size_bytes: int) -> None:
                     id, tenant_id, repo, revision, file_name, size_bytes,
                     publisher, catalog_id, class_id, status, created_at, updated_at
                 ) VALUES (
-                    :id, :tenant, 'bartowski/Llama', 'main', 'model.gguf', :size,
+                    CAST(:id AS uuid), CAST(:tenant AS uuid), 'bartowski/Llama', 'main',
+                    'model.gguf', :size,
                     'bartowski', 'llama', 'agx-large', 'fit', now(), now()
                 )
                 """
@@ -94,10 +95,11 @@ def _insert_device(
             INSERT INTO hypermesh_devices (
                 id, tenant_id, class_id, host_org_id, serial, path_a,
                 path_b_state, loaded_instance_state, enrolled, created_at,
-                sell_state, lab
+                sell_state, role, lab
             ) VALUES (
-                :id, :tenant, 'agx-large', :host, :serial, CAST(:path_a AS jsonb),
-                :path_b, 'none', :enrolled, now(), :sell, :lab
+                CAST(:id AS uuid), CAST(:tenant AS uuid), 'agx-large', CAST(:host AS uuid),
+                :serial, CAST(:path_a AS jsonb),
+                :path_b, 'none', :enrolled, now(), :sell, 'host', :lab
             )
             """
         ),
@@ -123,7 +125,7 @@ def _device(url: str, device_id: str) -> dict[str, object]:
                 """
                 SELECT lab, enrolled, sell_state, path_b_state
                 FROM hypermesh_devices
-                WHERE id = :id AND tenant_id = :tenant
+                WHERE id = CAST(:id AS uuid) AND tenant_id = CAST(:tenant AS uuid)
                 """
             ),
             {"id": device_id, "tenant": _MARKETPLACE},
@@ -143,7 +145,7 @@ def _prices(url: str) -> dict[str, object]:
             text(
                 """
                 SELECT hourly_rate_cents FROM hypermesh_hardware_classes
-                WHERE tenant_id = :tenant AND class_id = 'agx-large'
+                WHERE tenant_id = CAST(:tenant AS uuid) AND class_id = 'agx-large'
                 """
             ),
             {"tenant": _MARKETPLACE},
@@ -153,7 +155,7 @@ def _prices(url: str) -> dict[str, object]:
                 """
                 SELECT certified, tokens_per_sec, per_1k_token_cents, loaded_hour_min_cents
                 FROM hypermesh_catalog
-                WHERE tenant_id = :tenant AND catalog_id = 'llama-3.1-8b-q4'
+                WHERE tenant_id = CAST(:tenant AS uuid) AND catalog_id = 'llama-3.1-8b-q4'
                 """
             ),
             {"tenant": _MARKETPLACE},
@@ -173,8 +175,33 @@ def postgres(require_docker: None):
         yield normalize_sync_sqlalchemy_url(pg.get_connection_url())
 
 
+def _narrow_size_bytes(url: str) -> None:
+    """Rebuild the pan-test shape: INTEGER columns from before this change.
+
+    Revision 0001 runs ``Base.metadata.create_all``. Current models are
+    BIGINT, so a fresh chain is already wide and 0030's CREATE is a no-op.
+    Production was migrated when the models were still Integer.
+    """
+
+    eng = create_engine(url)
+    with eng.begin() as cx:
+        cx.execute(
+            text(
+                "ALTER TABLE aiuditor_candidates "
+                "ALTER COLUMN size_bytes TYPE INTEGER"
+            )
+        )
+        cx.execute(
+            text(
+                "ALTER TABLE aiuditor_admissions "
+                "ALTER COLUMN size_bytes TYPE INTEGER"
+            )
+        )
+
+
 def test_size_bytes_bigint_upgrade_and_downgrade(postgres: str) -> None:
     _upgrade(postgres, _BEFORE_BIGINT)
+    _narrow_size_bytes(postgres)
     assert _size_type(postgres, "aiuditor_candidates") == "integer"
     assert _size_type(postgres, "aiuditor_admissions") == "integer"
     with pytest.raises(DBAPIError):
@@ -225,28 +252,29 @@ def test_lab_identity_keeps_listing_cert_and_price(postgres: str) -> None:
             text(
                 """
                 INSERT INTO hypermesh_hardware_classes (
-                    tenant_id, class_id, vendor, sku, module, memory_gb,
-                    path_b_suite_id, hourly_rate_cents
+                    id, tenant_id, class_id, vendor, sku, module, memory_gb,
+                    public_sku, path_b_suite_id, hourly_rate_cents
                 ) VALUES (
-                    :tenant, 'agx-large', 'NVIDIA', 'AGX', 'AGX', 64, 'thin', 1234
+                    CAST(:id AS uuid), CAST(:tenant AS uuid), 'agx-large',
+                    'NVIDIA', 'AGX', 'AGX', 64, true, 'thin', 1234
                 )
                 """
             ),
-            {"tenant": _MARKETPLACE},
+            {"tenant": _MARKETPLACE, "id": str(uuid.uuid4())},
         )
         cx.execute(
             text(
                 """
                 INSERT INTO hypermesh_catalog (
-                    tenant_id, catalog_id, artifact_name, class_id,
+                    id, tenant_id, catalog_id, artifact_name, class_id,
                     certified, tokens_per_sec, per_1k_token_cents, loaded_hour_min_cents
                 ) VALUES (
-                    :tenant, 'llama-3.1-8b-q4', 'Llama', 'agx-large',
-                    true, 9.5, 77, 88
+                    CAST(:id AS uuid), CAST(:tenant AS uuid), 'llama-3.1-8b-q4',
+                    'Llama', 'agx-large', true, 9.5, 77, 88
                 )
                 """
             ),
-            {"tenant": _MARKETPLACE},
+            {"tenant": _MARKETPLACE, "id": str(uuid.uuid4())},
         )
     before_prices = _prices(postgres)
 
