@@ -18,6 +18,7 @@ stack recreate.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -438,6 +439,79 @@ def test_runners_concurrency_and_parallelism_are_unchanged() -> None:
     assert workflow["jobs"]["publish"]["strategy"]["fail-fast"] is False
 
 
+# pipefail plus `grep -q` (any quiet flag cluster, including -qxF). The
+# reader exits at the first hit and the writer can take SIGPIPE.
+_QUIET_GREP_PIPE = re.compile(
+    r"\|\s*grep(?:\s+(?:--[A-Za-z0-9-]+|-[A-Za-z]+))*\s+(?:--quiet|-[A-Za-z]*q[A-Za-z]*)\b"
+)
+
+
+def _run_scripts() -> list[tuple[str, str, str]]:
+    found: list[tuple[str, str, str]] = []
+    for job_name, job in _workflow()["jobs"].items():
+        for step in job.get("steps") or []:
+            script = step.get("run")
+            if isinstance(script, str):
+                found.append((job_name, str(step.get("name") or step.get("id") or ""), script))
+    return found
+
+
+def _carry_script() -> str:
+    script = next(
+        script
+        for job_name, name, script in _run_scripts()
+        if job_name == "deployable" and name == "Carry unchanged images to this sha"
+    )
+    return script
+
+
+def _quiet_grep_pipe_misses(built: list[str], service: str) -> bool:
+    """True when the old `printf | grep -qxF` check would treat service as absent.
+
+    The payload has to be larger than the pipe buffer. A short list fits in
+    one write and the race rarely loses; past the buffer, grep -q closes the
+    pipe while printf is still writing and pipefail reports 141.
+    """
+
+    script = r"""
+set -o pipefail
+mapfile -t built < <(printf '%s' "$BUILT" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))')
+if printf '%s\n' "${built[@]}" | grep -qxF "$SVC"; then
+  exit 0
+fi
+exit 1
+"""
+    # A minimal environment: one string longer than 128KiB is E2BIG, and the
+    # parent environment is not needed to decide membership.
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "BUILT": json.dumps(built),
+            "SVC": service,
+        },
+    )
+    if completed.returncode not in (0, 1):
+        raise AssertionError(completed.stderr)
+    return completed.returncode != 0
+
+
+def _built_list_that_sigpipes(service: str) -> list[str]:
+    # Just past a 64KiB pipe, and under the 128KiB single-argument limit so
+    # the same list can be passed to the carry script in BUILT.
+    built = [service, *[f"pad-{index:05d}-{'x' * 32}" for index in range(1800)]]
+    encoded = json.dumps(built)
+    if len(encoded) >= 120_000:
+        raise AssertionError(f"BUILT payload is {len(encoded)} bytes")
+    if not _quiet_grep_pipe_misses(built, service):
+        raise AssertionError(f"payload did not make quiet grep fail under pipefail for {service}")
+    return built
+
+
 def test_carry_refuses_when_the_base_was_not_published() -> None:
     workflow = _workflow()
     steps = workflow["jobs"]["deployable"]["steps"]
@@ -457,6 +531,82 @@ def test_carry_refuses_when_the_base_was_not_published() -> None:
     retag = script.index("imagetools create")
     assert refusal < retag
     assert 'CARRY_ALLOWED:-' in script
+
+
+def _code_lines(script: str) -> str:
+    return "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_workflow_scripts_do_not_pipe_into_quiet_grep() -> None:
+    """Every run script in ghcr-test.yml, not only the carry step.
+
+    The other pipelines feed python, which reads stdin to EOF. Those are
+    not this bug. A quiet grep on the read end of a pipe is.
+    """
+
+    old = "if printf '%s\\n' \"${built[@]}\" | grep -qxF \"$svc\"; then"
+    assert _QUIET_GREP_PIPE.search(old)
+    assert _QUIET_GREP_PIPE.search("psql | grep --quiet 1")
+    assert _QUIET_GREP_PIPE.search("printf | grep -F -q x")
+    assert not _QUIET_GREP_PIPE.search("printf '%s' \"$ALL\" | python3 -c 'import json'")
+    assert not _QUIET_GREP_PIPE.search(
+        "grep -qxF \"$svc\" <<<\"$(printf '%s\\n' \"${built[@]}\")\""
+    )
+    offenders = [
+        f"{job} / {name}"
+        for job, name, script in _run_scripts()
+        if "pipefail" in script and _QUIET_GREP_PIPE.search(_code_lines(script))
+    ]
+    assert offenders == []
+
+
+def test_carry_keeps_a_built_image_when_quiet_grep_would_sigpipe(tmp_path: Path) -> None:
+    """Run 36144583444 had marketplace in BUILT and still logged carrying :test.
+
+    The alembic-head check had already read marketplace:<sha>. The carry
+    step then retagged :test onto that sha, so the guard's result was
+    thrown away and the previous image was what :test promoted.
+    """
+
+    service = "marketplace"
+    built = [*_built_list_that_sigpipes(service), "ai-service"]
+    assert _quiet_grep_pipe_misses(built, service)
+
+    docker_log = tmp_path / "docker.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n')
+    stub.chmod(0o755)
+    sha = "3586fa8e70f540b9a47bdf90bd8f57aad92ce0d9"
+    completed = subprocess.run(
+        ["bash", "-c", _carry_script()],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "DOCKER_LOG": str(docker_log),
+            "ALL": json.dumps(["market", service, "ai-service", "template-service"]),
+            "BUILT": json.dumps(built),
+            "SHA": sha,
+            "CARRY_ALLOWED": "true",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert f"  {service}: built at this sha" in completed.stdout
+    assert "  ai-service: built at this sha" in completed.stdout
+    assert f"  {service}: carrying :test" not in completed.stdout
+    assert f"  market: carrying :test -> :{sha}" in completed.stdout
+    assert f"  template-service: carrying :test -> :{sha}" in completed.stdout
+    log = docker_log.read_text()
+    assert f"ghcr.io/fyberlabs/{service}:" not in log
+    assert f"ghcr.io/fyberlabs/ai-service:" not in log
+    assert f"ghcr.io/fyberlabs/market:{sha}" in log
+    assert f"ghcr.io/fyberlabs/template-service:{sha}" in log
 
 
 def test_resolve_base_missing_ancestor_and_divergent(tmp_path: Path) -> None:
