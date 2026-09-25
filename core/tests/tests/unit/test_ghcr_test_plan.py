@@ -543,9 +543,9 @@ def test_assert_compose_accepts_the_repo() -> None:
     plan.assert_compose_services(REPO_ROOT)
 
 
-def test_repo_alembic_head_is_revision_0039() -> None:
+def test_repo_alembic_head_is_revision_0041() -> None:
     versions = REPO_ROOT / plan.VERSIONS_DIR
-    assert plan.alembic_head.repo_head(versions) == "0039_lab_device_identity"
+    assert plan.alembic_head.repo_head(versions) == "0041_fleet_health"
 
 
 def test_alembic_versions_change_rebuilds_every_bundled_image() -> None:
