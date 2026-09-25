@@ -25,6 +25,7 @@ REQUIRED_BY_SERVICE: dict[str, tuple[str, ...]] = {
     "HYPERMESH_TICKET_HMAC_KEY": ("hypermesh-service", "hypermesh-gateway"),
     "HYPERMESH_GATEWAY_SERVICE_SECRET": ("hypermesh-service", "hypermesh-gateway"),
     "TURN_AUTH_SECRET": ("turn-service",),
+    "PRICING_SERVICE_TOKEN": ("hypermesh-service", "hypermesh-pricing"),
 }
 
 # Shared secrets that must be identical across every service that speaks them.
@@ -147,6 +148,32 @@ def test_env_example_lists_every_required_name(name: str) -> None:
     assert name in declared, f"{name} is required but absent from {ENV_EXAMPLE.name}"
 
 
+# Digest-pinned images we pull and do not build. ghcr-test.yml stays unchanged.
+_EXTERNAL_DIGEST_IMAGES = frozenset({"hypermesh-pricing"})
+_DIGEST_PIN = re.compile(r"@sha256:([0-9a-f]{64})")
+
+
+def _ci_built_image_name(image: str) -> str | None:
+    """Repo name CI must publish, or None for a digest-pinned external image."""
+
+    text = image.strip()
+    if text.startswith("${") and ":-" in text:
+        text = text.split(":-", 1)[1]
+        if text.endswith("}"):
+            text = text[:-1]
+    marker = "ghcr.io/fyberlabs/"
+    if marker not in text:
+        return None
+    repo = text.split(marker, 1)[1]
+    if "@sha256:" in repo:
+        name = repo.split("@", 1)[0]
+        digest = _DIGEST_PIN.search(repo)
+        if name in _EXTERNAL_DIGEST_IMAGES and digest is not None:
+            return None
+        return name
+    return repo.split(":", 1)[0].split("@", 1)[0]
+
+
 def test_every_pulled_image_is_one_ci_builds() -> None:
     """A pull name CI never pushes silently pins the VM to a stale image.
 
@@ -160,10 +187,10 @@ def test_every_pulled_image_is_one_ci_builds() -> None:
 
     overlay = yaml.load(VM_OVERLAY.read_text(), Loader=_ComposeLoader)
     pulled = {
-        image.split("/")[-1].split(":", 1)[0]
+        name
         for service in overlay["services"].values()
         if isinstance(service, dict) and (image := service.get("image", ""))
-        if image.startswith("ghcr.io/fyberlabs/")
+        if (name := _ci_built_image_name(str(image)))
     }
 
     workflow = (REPO_ROOT / ".github" / "workflows" / "ghcr-test.yml").read_text()
