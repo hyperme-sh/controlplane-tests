@@ -543,9 +543,30 @@ def test_assert_compose_accepts_the_repo() -> None:
     plan.assert_compose_services(REPO_ROOT)
 
 
-def test_repo_alembic_head_is_revision_0039() -> None:
+def test_repo_alembic_head_matches_script_directory() -> None:
+    """The promote guard and Alembic agree on exactly one head at this commit.
+
+    The revision id is whatever ``ScriptDirectory`` reports. Pinning it here
+    broke when a later migration landed beside the guard.
+    """
+
+    from alembic.script import ScriptDirectory
+
+    script_location = REPO_ROOT / "core/lib/controlplane-db/src/controlplane_db/alembic"
+    heads = ScriptDirectory(str(script_location)).get_heads()
+    assert len(heads) == 1
+    expected = heads[0]
+
     versions = REPO_ROOT / plan.VERSIONS_DIR
-    assert plan.alembic_head.repo_head(versions) == "0039_lab_device_identity"
+    assert plan.alembic_head.repo_head(versions) == expected
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "alembic_head.py")],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout.strip() == expected
 
 
 def test_alembic_versions_change_rebuilds_every_bundled_image() -> None:
