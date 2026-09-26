@@ -60,6 +60,11 @@ class _LockTimeout(Exception):
 
 @pytest.mark.asyncio
 async def test_registration_lock_timeout_warns_and_skips_claim(caplog) -> None:
+    # Alembic's fileConfig disables loggers it does not name. The workspace
+    # suite loads that config before this test, which would swallow the warning.
+    log = logging.getLogger("controlplane_events.routing_consumer")
+    log.disabled = False
+    log.propagate = True
     consumer = _consumer()
     consumer._engine = _Engine(_LockTimeout("canceling statement due to lock timeout"))
     claimed = False
