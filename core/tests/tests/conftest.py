@@ -127,8 +127,15 @@ def redis_url(redis_container: RedisContainer) -> str:
 def kafka_bootstrap(require_docker: None):
     if KafkaContainer is None:
         pytest.skip("Kafka testcontainer not available")
-    with KafkaContainer(image="confluentinc/cp-kafka:7.6.1") as kafka:
+    # The default wait is 30s. On a busy runner the broker is still logging
+    # "Awaiting socket connections" when that expires, before
+    # "KafkaServer id=N started".
+    kafka = KafkaContainer(image="confluentinc/cp-kafka:7.6.1")
+    kafka.start(timeout=120)
+    try:
         yield kafka.get_bootstrap_server()
+    finally:
+        kafka.stop()
 
 
 @pytest_asyncio.fixture
