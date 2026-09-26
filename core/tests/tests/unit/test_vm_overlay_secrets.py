@@ -46,13 +46,24 @@ class _ComposeLoader(yaml.SafeLoader):
     """SafeLoader that tolerates Compose merge tags such as ``!override``."""
 
 
+def _compose_tag_kind(node: yaml.Node) -> str:
+    if isinstance(node, yaml.SequenceNode):
+        return "seq"
+    if isinstance(node, yaml.ScalarNode):
+        return "str"
+    return "map"
+
+
 _ComposeLoader.add_multi_constructor(
-    "!", lambda loader, suffix, node: loader.construct_object(node.__class__(
-        tag=f"tag:yaml.org,2002:{'seq' if isinstance(node, yaml.SequenceNode) else 'map'}",
-        value=node.value,
-        start_mark=node.start_mark,
-        end_mark=node.end_mark,
-    ))
+    "!",
+    lambda loader, suffix, node: loader.construct_object(
+        node.__class__(
+            tag=f"tag:yaml.org,2002:{_compose_tag_kind(node)}",
+            value=node.value,
+            start_mark=node.start_mark,
+            end_mark=node.end_mark,
+        )
+    ),
 )
 
 
@@ -314,7 +325,7 @@ def test_every_app_service_restarts(overlay: dict) -> None:
 
     hypermesh-service exited on a bad schema and sat dead for fourteen hours
     while the other twenty containers reported healthy, because a restart policy
-    is set on postgres/redis/kafka/keycloak and on nothing else. The VM is
+    is set on postgres/redis/keycloak and on nothing else. The VM is
     unattended, so "it stopped" has to become visible or self-correcting.
 
     App services with no ``profiles`` key stay on ``unless-stopped``. A service
@@ -326,7 +337,15 @@ def test_every_app_service_restarts(overlay: dict) -> None:
     app = _app_services(overlay)
     assert len(app) >= 15, f"only found {len(app)} app services, the scan is wrong"
 
-    always_on = {n: c for n, c in app.items() if "profiles" not in c}
+    # controlplane-migrate must exit 0 and stay stopped. unless-stopped would
+    # start another alembic upgrade as soon as the successful one finished.
+    one_shot = {"controlplane-migrate"}
+    for name in one_shot:
+        assert app[name].get("restart") == "no", f"{name} must not restart after success"
+
+    always_on = {
+        n: c for n, c in app.items() if "profiles" not in c and n not in one_shot
+    }
     manual = {n: c for n, c in app.items() if "profiles" in c}
 
     missing = sorted(n for n, c in always_on.items() if c.get("restart") != "unless-stopped")
@@ -354,11 +373,10 @@ def test_every_app_service_is_capped(overlay: dict) -> None:
     uncapped = sorted(n for n, c in _app_services(overlay).items() if not c.get("mem_limit"))
     assert not uncapped, f"no mem_limit on: {', '.join(uncapped)}"
 
-    # The JVMs are the two largest and are container-aware, so the cap also caps
-    # their heap. Postgres is deliberately uncapped: page cache counts against a
-    # cgroup, so a limit there caps caching and vacuum dies first.
-    for name in ("kafka", "keycloak"):
-        assert overlay["services"][name].get("mem_limit"), f"{name} is uncapped"
+    # Keycloak's JVM is container-aware, so the cap also caps its heap.
+    # Postgres is deliberately uncapped: page cache counts against a cgroup,
+    # so a limit there caps caching and vacuum dies first.
+    assert overlay["services"]["keycloak"].get("mem_limit"), "keycloak is uncapped"
     assert not overlay["services"]["postgres"].get("mem_limit"), (
         "capping Postgres limits how much of the database it may cache"
     )

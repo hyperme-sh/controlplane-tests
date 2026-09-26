@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "panopticon-e2e-tests"
 version = "0.0.0"
 requires-python = ">=3.13"
-description = "Multi-service Kafka + Postgres integration tests"
+description = "Multi-service Postgres event-bus integration tests"
 dependencies = [
     "panopticon-tests",
     "user-service",
@@ -14,6 +14,7 @@ dependencies = [
     "payment-service",
     "marketplace-service",
     "ai-service",
+    "hypermesh-service",
     "controlplane-core",
     "controlplane-db",
     "controlplane-events",
@@ -22,7 +23,6 @@ dependencies = [
     "httpx>=0.28.0",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.2.0",
-    "aiokafka>=0.12.0",
     "testcontainers>=4.9.0",
     "controlplane-edge",
 ]
@@ -34,6 +34,7 @@ acl-service = { workspace = true }
 payment-service = { workspace = true }
 marketplace-service = { workspace = true }
 ai-service = { workspace = true }
+hypermesh-service = { workspace = true }
 controlplane-core = { workspace = true }
 controlplane-db = { workspace = true }
 controlplane-events = { workspace = true }
@@ -59,6 +60,7 @@ pythonpath = [
     "../payment-service/src",
     "../marketplace-service/src",
     "../ai-service/src",
+    "../../products/hypermesh/src",
     "../auth-service/src",
     "../lib/controlplane-core/src",
     "../lib/controlplane-db/src",

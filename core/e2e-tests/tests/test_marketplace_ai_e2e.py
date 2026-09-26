@@ -1,7 +1,7 @@
-"""Postgres + shared envelopes: free agent listing purchase → entitlement → metered inference.
+"""Postgres events: free agent listing purchase → entitlement → metered inference.
 
-Kafka fan-out is exercised in docker-compose; this test calls the same consumer handler
-directly after HTTP purchase so CI stays deterministic (no sleep/rebalance flakes).
+The HTTP purchase writes the business row. This test then calls the same consumer
+handler directly so CI stays deterministic.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from auth_service.schemas import AuthMeResponse
 from controlplane_events.envelope import ControlPlaneEventEnvelope
 from controlplane_events.payloads.purchase_completed import PurchaseCompletedEvent
 
-from ai_service.infrastructure.kafka_consumers import build_ai_event_consumers
+from ai_service.infrastructure.event_consumers import build_ai_event_consumers
 
 
 @pytest.mark.integration
@@ -30,13 +30,10 @@ from ai_service.infrastructure.kafka_consumers import build_ai_event_consumers
 async def test_free_agent_listing_purchase_entitles_inference(
     migrated_postgres: str,
     db_async_url: str,
-    kafka_bootstrap: str,
-    kafka_topic_created: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api_config.settings, "database_url", db_async_url)
-    monkeypatch.setattr(api_config.settings, "kafka_bootstrap_servers", kafka_bootstrap)
-    monkeypatch.setattr(api_config.settings, "kafka_events_topic", kafka_topic_created)
+    monkeypatch.setattr(api_config.settings, "azure_service_bus_connection_string", None)
     monkeypatch.setattr(api_config.settings, "ai_upstream_base_url", "http://test-llm.invalid/v1")
     monkeypatch.setattr(api_config.settings, "acl_service_base_url", None)
     monkeypatch.setattr(api_config.settings, "ai_rate_limit_per_minute", 500)
@@ -119,7 +116,7 @@ async def test_free_agent_listing_purchase_entitles_inference(
                 assert pr.status_code == 201, pr.text
                 pur = pr.json()
 
-            cons = build_ai_event_consumers(kafka_bootstrap, kafka_topic_created)
+            cons = build_ai_event_consumers(db_async_url)
             env = ControlPlaneEventEnvelope(
                 event_type=PURCHASE_COMPLETED_V1,
                 service="marketplace-service",

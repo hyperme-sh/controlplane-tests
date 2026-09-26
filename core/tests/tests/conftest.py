@@ -10,17 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
-from panopticon_tests.fixtures.kafka import await_kafka_controller_ready
 from panopticon_tests.fixtures.postgres import (
     async_db_url,
     normalize_sync_sqlalchemy_url,
     run_alembic_upgrade,
 )
-
-try:
-    from testcontainers.kafka import KafkaContainer
-except ImportError:
-    KafkaContainer = None  # type: ignore[misc, assignment]
 
 
 @pytest.fixture(scope="session")
@@ -121,39 +115,6 @@ def redis_url(redis_container: RedisContainer) -> str:
     host = redis_container.get_container_host_ip()
     port = redis_container.get_exposed_port(6379)
     return f"redis://{host}:{port}/0"
-
-
-@pytest.fixture(scope="session")
-def kafka_bootstrap(require_docker: None):
-    if KafkaContainer is None:
-        pytest.skip("Kafka testcontainer not available")
-    # The default wait is 30s. On a busy runner the broker is still logging
-    # "Awaiting socket connections" when that expires, before
-    # "KafkaServer id=N started".
-    kafka = KafkaContainer(image="confluentinc/cp-kafka:7.6.1")
-    kafka.start(timeout=120)
-    try:
-        yield kafka.get_bootstrap_server()
-    finally:
-        kafka.stop()
-
-
-@pytest_asyncio.fixture
-async def kafka_topic_created(kafka_bootstrap: str):
-    from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-
-    from controlplane_events.topics import CONTROLPLANE_EVENTS_V1
-
-    admin = AIOKafkaAdminClient(bootstrap_servers=kafka_bootstrap)
-    await admin.start()
-    await await_kafka_controller_ready(admin)
-    try:
-        await admin.create_topics(
-            [NewTopic(name=CONTROLPLANE_EVENTS_V1, num_partitions=1, replication_factor=1)]
-        )
-    finally:
-        await admin.close()
-    yield CONTROLPLANE_EVENTS_V1
 
 
 def pytest_configure(config):

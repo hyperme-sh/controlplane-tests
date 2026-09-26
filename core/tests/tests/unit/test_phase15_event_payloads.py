@@ -1,4 +1,4 @@
-"""Phase 1.5 marketplace / AI Kafka payload contracts."""
+"""Phase 1.5 marketplace / AI event payload contracts."""
 
 from __future__ import annotations
 
