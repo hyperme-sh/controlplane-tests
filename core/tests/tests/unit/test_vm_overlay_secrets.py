@@ -112,6 +112,54 @@ def test_optional_secret_is_still_declared(
         assert name in env, f"{service} does not declare {name}"
 
 
+def test_pricing_service_token_is_passed_through_without_a_literal_default(overlay: dict) -> None:
+    """infra#135 treats the KV secret as optional. ``:?`` would fail the whole plane."""
+
+    for service in ("hypermesh-service", "hypermesh-pricing"):
+        env = _service_env(overlay, service)
+        assert env.get("PRICING_SERVICE_TOKEN") == "${PRICING_SERVICE_TOKEN:-}", (
+            f"{service} must pass PRICING_SERVICE_TOKEN through with an empty fallback"
+        )
+    depends = overlay["services"]["hypermesh-service"].get("depends_on") or {}
+    if isinstance(depends, dict):
+        pricing = depends.get("hypermesh-pricing")
+        assert pricing is None or pricing.get("condition") != "service_healthy"
+    else:
+        assert "hypermesh-pricing" not in depends
+
+
+def test_base_compose_does_not_wait_for_pricing_health() -> None:
+    base = yaml.load((REPO_ROOT / "docker-compose.yaml").read_text(), Loader=_ComposeLoader)
+    service = base["services"]["hypermesh-service"]
+    depends = service.get("depends_on") or {}
+    assert "hypermesh-pricing" not in depends
+    assert base["services"]["hypermesh-pricing"].get("profiles") == ["pricing"]
+
+
+_DIGEST_IMAGE = re.compile(r"^ghcr\.io/fyberlabs/hypermesh-pricing@sha256:[0-9a-f]{64}$")
+
+
+def test_pricing_image_must_be_a_digest() -> None:
+    """A tag such as ``:v0.1.1`` or ``:test`` is not a pin. The real digest lands here."""
+
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing:v0.1.1") is None
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing:test") is None
+    assert _DIGEST_IMAGE.fullmatch("ghcr.io/fyberlabs/hypermesh-pricing@sha256:abcd") is None
+    for path in (REPO_ROOT / "docker-compose.yaml", VM_OVERLAY):
+        fallbacks = re.findall(r"\$\{HYPERMESH_PRICING_IMAGE:-(.+?)\}", path.read_text())
+        assert fallbacks, f"{path.name} has no HYPERMESH_PRICING_IMAGE default"
+        for image in fallbacks:
+            assert _DIGEST_IMAGE.fullmatch(image), image
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        if not line.startswith("HYPERMESH_PRICING_IMAGE="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value:
+            assert _DIGEST_IMAGE.fullmatch(value), value
+    script = (REPO_ROOT / "scripts" / "compose-vm.sh").read_text()
+    assert "--profile pricing" in script
+
+
 def test_no_secret_defaults_to_a_value_committed_to_git(overlay: dict) -> None:
     """``${VAR:-literal}`` on a credential ships a usable secret in the repo."""
 
@@ -147,6 +195,32 @@ def test_env_example_lists_every_required_name(name: str) -> None:
     assert name in declared, f"{name} is required but absent from {ENV_EXAMPLE.name}"
 
 
+# Digest-pinned images we pull and do not build. ghcr-test.yml stays unchanged.
+_EXTERNAL_DIGEST_IMAGES = frozenset({"hypermesh-pricing"})
+_DIGEST_PIN = re.compile(r"@sha256:([0-9a-f]{64})")
+
+
+def _ci_built_image_name(image: str) -> str | None:
+    """Repo name CI must publish, or None for a digest-pinned external image."""
+
+    text = image.strip()
+    if text.startswith("${") and ":-" in text:
+        text = text.split(":-", 1)[1]
+        if text.endswith("}"):
+            text = text[:-1]
+    marker = "ghcr.io/fyberlabs/"
+    if marker not in text:
+        return None
+    repo = text.split(marker, 1)[1]
+    if "@sha256:" in repo:
+        name = repo.split("@", 1)[0]
+        digest = _DIGEST_PIN.search(repo)
+        if name in _EXTERNAL_DIGEST_IMAGES and digest is not None:
+            return None
+        return name
+    return repo.split(":", 1)[0].split("@", 1)[0]
+
+
 def test_every_pulled_image_is_one_ci_builds() -> None:
     """A pull name CI never pushes silently pins the VM to a stale image.
 
@@ -160,10 +234,10 @@ def test_every_pulled_image_is_one_ci_builds() -> None:
 
     overlay = yaml.load(VM_OVERLAY.read_text(), Loader=_ComposeLoader)
     pulled = {
-        image.split("/")[-1].split(":", 1)[0]
+        name
         for service in overlay["services"].values()
         if isinstance(service, dict) and (image := service.get("image", ""))
-        if image.startswith("ghcr.io/fyberlabs/")
+        if (name := _ci_built_image_name(str(image)))
     }
 
     workflow = (REPO_ROOT / ".github" / "workflows" / "ghcr-test.yml").read_text()
