@@ -255,3 +255,62 @@ def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     assert _tables(postgres) == set(_TABLES)
     assert _nullable(postgres, "hypermesh_leases", "ruleset_version") == "YES"
     assert _nullable(postgres, "hypermesh_leases", "failed_at") == "YES"
+
+
+def test_duplicate_acl_rules_collapse_before_unique_index(postgres: str) -> None:
+    """0047 must not fail when identical acl_casbin_rules rows already exist."""
+
+    _upgrade(postgres, _EVENTS)
+    assert _version(postgres) == _EVENTS
+    tenant = uuid.uuid4()
+    eng = create_engine(postgres)
+    with eng.begin() as cx:
+        cx.execute(
+            text(
+                "INSERT INTO tenants (id, name, is_active) VALUES (CAST(:id AS uuid), :name, true)"
+            ),
+            {"id": str(tenant), "name": f"dup-{tenant.hex[:8]}"},
+        )
+        ids = [
+            int(row[0])
+            for row in cx.execute(
+                text(
+                    """
+                    INSERT INTO acl_casbin_rules (tenant_id, ptype, v0, v1, v2)
+                    VALUES
+                        (CAST(:tenant AS uuid), 'p', 'user', 'user_profile', 'read'),
+                        (CAST(:tenant AS uuid), 'p', 'user', 'user_profile', 'read'),
+                        (CAST(:tenant AS uuid), 'p', 'other', 'user_profile', 'read')
+                    RETURNING id
+                    """
+                ),
+                {"tenant": str(tenant)},
+            ).fetchall()
+        ]
+    kept = min(ids[0], ids[1])
+    _upgrade(postgres, "head")
+    assert _version(postgres) == _HEAD
+    with eng.connect() as cx:
+        left = [
+            int(row[0])
+            for row in cx.execute(
+                text(
+                    """
+                    SELECT id FROM acl_casbin_rules
+                    WHERE tenant_id = CAST(:tenant AS uuid)
+                    ORDER BY id
+                    """
+                ),
+                {"tenant": str(tenant)},
+            ).fetchall()
+        ]
+        indexdef = cx.execute(
+            text(
+                """
+                SELECT indexdef FROM pg_indexes
+                WHERE indexname = 'uq_acl_casbin_rules_identity'
+                """
+            )
+        ).scalar_one()
+    assert left == sorted([kept, ids[2]])
+    assert "NULLS NOT DISTINCT" in indexdef

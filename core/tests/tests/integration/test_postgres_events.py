@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 import pytest
@@ -348,6 +349,84 @@ def test_prune_function_removes_old_terminal_events(migrated_postgres: str) -> N
     assert int(left) == 0
 
 
+def test_prune_removes_old_events_with_no_deliveries(migrated_postgres: str) -> None:
+    eng = create_engine(migrated_postgres)
+    event_type = f"test.unsubscribed.{uuid.uuid4().hex[:8]}.v1"
+    with eng.begin() as conn:
+        old_id = conn.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope, created_at)
+                VALUES (
+                    :event_type, NULL, CAST(:envelope AS jsonb),
+                    now() - interval '40 days'
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}"}}',
+            },
+        ).scalar_one()
+        held_id = conn.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope, created_at)
+                VALUES (
+                    :event_type, NULL, CAST(:envelope AS jsonb),
+                    now() - interval '40 days'
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}","n":2}}',
+            },
+        ).scalar_one()
+        conn.execute(
+            text(
+                """
+                INSERT INTO controlplane_event_deliveries (
+                    event_id, consumer_group, status, attempts, max_attempts
+                )
+                VALUES (:id, :group, 'pending', 0, 5)
+                """
+            ),
+            {"id": held_id, "group": f"hold-{uuid.uuid4().hex[:8]}"},
+        )
+        fresh_id = conn.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}","n":3}}',
+            },
+        ).scalar_one()
+        conn.execute(text("SELECT prune_controlplane_events(interval '30 days')"))
+        left = {
+            int(row[0])
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT id FROM controlplane_events
+                    WHERE id IN (:old_id, :held_id, :fresh_id)
+                    """
+                ),
+                {"old_id": old_id, "held_id": held_id, "fresh_id": fresh_id},
+            ).fetchall()
+        }
+    assert int(old_id) not in left
+    assert int(held_id) in left
+    assert int(fresh_id) in left
+
+
 def test_uncommitted_insert_does_not_skip_an_earlier_id(migrated_postgres: str) -> None:
     """tx A holds id 1, tx B commits id 2, then A commits. Both get a delivery row."""
 
@@ -495,3 +574,111 @@ def test_expired_lease_at_max_attempts_is_dead(migrated_postgres: str) -> None:
             {"group": group},
         ).scalar_one()
     assert status == "dead"
+
+
+def _share_waiter_queued(eng) -> bool:
+    """True when some session is waiting for SHARE on controlplane_events.
+
+    The open insert holds ROW EXCLUSIVE, which does not conflict with SHARE
+    UPDATE EXCLUSIVE. A waiting SHARE does, because Postgres queues a new
+    request behind any conflicting waiter. A lock timeout on this probe means
+    registration is blocked on the insert.
+    """
+
+    probe = eng.connect()
+    try:
+        tx = probe.begin()
+        try:
+            probe.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            probe.execute(
+                text("LOCK TABLE controlplane_events IN SHARE UPDATE EXCLUSIVE MODE")
+            )
+        except Exception as exc:
+            tx.rollback()
+            return "lock timeout" in str(exc).lower()
+        tx.rollback()
+        return False
+    finally:
+        probe.close()
+
+
+def test_register_during_open_insert_still_delivers(migrated_postgres: str) -> None:
+    """A new group registered while an insert is open still gets that event."""
+
+    group = f"reg-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.reg.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    hold = eng.connect()
+    hold_tx = hold.begin()
+    errors: list[BaseException] = []
+    thread: threading.Thread | None = None
+    try:
+        event_id = hold.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": (
+                    f'{{"event_type":"{event_type}","service":"tests","payload":{{}}}}'
+                ),
+            },
+        ).scalar_one()
+
+        def _register() -> None:
+            local = create_engine(migrated_postgres)
+            try:
+                with local.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            SELECT register_controlplane_event_consumer(
+                                :group, string_to_array(:types, ','), 'earliest', 5
+                            )
+                            """
+                        ),
+                        {"group": group, "types": event_type},
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                local.dispose()
+
+        thread = threading.Thread(target=_register)
+        thread.start()
+        deadline = time.monotonic() + 10
+        queued = False
+        while time.monotonic() < deadline:
+            if errors:
+                break
+            if _share_waiter_queued(eng):
+                queued = True
+                break
+            time.sleep(0.02)
+        assert queued, f"register did not block on the open insert: errors={errors!r}"
+        hold_tx.commit()
+        thread.join(timeout=20)
+    finally:
+        if hold_tx.is_active:
+            hold_tx.rollback()
+        hold.close()
+        if thread is not None:
+            thread.join(timeout=20)
+
+    assert errors == []
+    assert thread is not None and not thread.is_alive()
+    with eng.connect() as conn:
+        status = conn.execute(
+            text(
+                """
+                SELECT status FROM controlplane_event_deliveries
+                WHERE consumer_group = :group AND event_id = :event_id
+                """
+            ),
+            {"group": group, "event_id": event_id},
+        ).scalar_one()
+    assert status == "pending"

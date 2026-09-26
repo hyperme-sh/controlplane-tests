@@ -46,13 +46,24 @@ class _ComposeLoader(yaml.SafeLoader):
     """SafeLoader that tolerates Compose merge tags such as ``!override``."""
 
 
+def _compose_tag_kind(node: yaml.Node) -> str:
+    if isinstance(node, yaml.SequenceNode):
+        return "seq"
+    if isinstance(node, yaml.ScalarNode):
+        return "str"
+    return "map"
+
+
 _ComposeLoader.add_multi_constructor(
-    "!", lambda loader, suffix, node: loader.construct_object(node.__class__(
-        tag=f"tag:yaml.org,2002:{'seq' if isinstance(node, yaml.SequenceNode) else 'map'}",
-        value=node.value,
-        start_mark=node.start_mark,
-        end_mark=node.end_mark,
-    ))
+    "!",
+    lambda loader, suffix, node: loader.construct_object(
+        node.__class__(
+            tag=f"tag:yaml.org,2002:{_compose_tag_kind(node)}",
+            value=node.value,
+            start_mark=node.start_mark,
+            end_mark=node.end_mark,
+        )
+    ),
 )
 
 
