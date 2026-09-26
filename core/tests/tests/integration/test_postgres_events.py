@@ -870,3 +870,158 @@ def test_register_lock_timeout_then_retry_delivers(migrated_postgres: str) -> No
         ).scalar_one()
     assert status == "pending"
     eng.dispose()
+
+
+def test_temp_shadow_tables_do_not_capture_definer_writes(migrated_postgres: str) -> None:
+    """A caller's temp tables must not hide the real subscription or delivery tables."""
+
+    role = "panopticon_events_shadow"
+    group = f"shadow-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.shadow.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    DO $$ BEGIN
+                        CREATE ROLE {role} NOINHERIT NOBYPASSRLS;
+                    EXCEPTION WHEN duplicate_object THEN
+                        NULL;
+                    END $$;
+                    """
+                )
+            )
+            conn.execute(text(_REGISTER_GRANTS.format(role=role)))
+            conn.execute(text(f"GRANT {role} TO CURRENT_USER"))
+            defs = conn.execute(
+                text(
+                    """
+                    SELECT pg_get_functiondef(p.oid)
+                    FROM pg_proc AS p
+                    JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                    WHERE n.nspname = 'public'
+                      AND p.proname IN (
+                        'notify_controlplane_event',
+                        'deliver_controlplane_event',
+                        'register_controlplane_event_consumer'
+                      )
+                    """
+                )
+            ).scalars().all()
+            assert len(defs) == 3
+            for defn in defs:
+                folded = defn.replace("'", "").replace('"', "")
+                assert "pg_catalog, public, pg_temp" in folded
+
+        with eng.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            conn.execute(text("CREATE TEMP TABLE shadow_log (which text, who text)"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE controlplane_event_subscriptions (
+                        consumer_group text,
+                        event_type text,
+                        max_attempts integer,
+                        UNIQUE (consumer_group, event_type)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE controlplane_event_deliveries (
+                        event_id bigint,
+                        consumer_group text,
+                        status text,
+                        attempts integer,
+                        max_attempts integer,
+                        available_at timestamptz,
+                        UNIQUE (consumer_group, event_id)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE FUNCTION pg_temp.record_shadow() RETURNS trigger
+                    LANGUAGE plpgsql AS $fn$
+                    BEGIN
+                        INSERT INTO shadow_log (which, who)
+                        VALUES (TG_TABLE_NAME, current_user);
+                        RETURN NEW;
+                    END;
+                    $fn$
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TRIGGER shadow_subscriptions
+                    AFTER INSERT ON controlplane_event_subscriptions
+                    FOR EACH ROW EXECUTE FUNCTION pg_temp.record_shadow()
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TRIGGER shadow_deliveries
+                    AFTER INSERT ON controlplane_event_deliveries
+                    FOR EACH ROW EXECUTE FUNCTION pg_temp.record_shadow()
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    SELECT register_controlplane_event_consumer(
+                        :group, string_to_array(:types, ','), 'earliest', 5
+                    )
+                    """
+                ),
+                {"group": group, "types": event_type},
+            )
+            event_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO public.controlplane_events (event_type, tenant_id, envelope)
+                    VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                    RETURNING id
+                    """
+                ),
+                {
+                    "event_type": event_type,
+                    "envelope": (
+                        f'{{"event_type":"{event_type}","service":"tests","payload":{{}}}}'
+                    ),
+                },
+            ).scalar_one()
+            fired = conn.execute(text("SELECT which, who FROM shadow_log")).fetchall()
+            subs = conn.execute(
+                text(
+                    """
+                    SELECT count(*) FROM public.controlplane_event_subscriptions
+                    WHERE consumer_group = :group AND event_type = :event_type
+                    """
+                ),
+                {"group": group, "event_type": event_type},
+            ).scalar_one()
+            status = conn.execute(
+                text(
+                    """
+                    SELECT status FROM public.controlplane_event_deliveries
+                    WHERE consumer_group = :group AND event_id = :event_id
+                    """
+                ),
+                {"group": group, "event_id": event_id},
+            ).scalar_one()
+        assert fired == []
+        assert int(subs) == 1
+        assert status == "pending"
+    finally:
+        eng.dispose()
