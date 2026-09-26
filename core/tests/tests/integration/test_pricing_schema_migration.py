@@ -260,6 +260,9 @@ def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     assert _tables(postgres) == set(_TABLES)
     assert _nullable(postgres, "hypermesh_leases", "ruleset_version") == "YES"
     assert _nullable(postgres, "hypermesh_leases", "failed_at") == "YES"
+    assert _nullable(postgres, "hypermesh_device_health", "disk_free_bytes") == "YES"
+    assert _nullable(postgres, "hypermesh_catalog", "size_bytes") == "YES"
+    assert _nullable(postgres, "hypermesh_jobs", "dispatch_skip_reason") == "YES"
 
 
 def test_duplicate_acl_rules_collapse_before_unique_index(postgres: str) -> None:
@@ -377,7 +380,11 @@ def test_duplicate_acl_rules_collapse_as_nobypassrls_owner(postgres: str) -> Non
         cx.execute(text(f'GRANT CONNECT ON DATABASE "{database}" TO {role}'))
     kept = min(ids[0], ids[1])
     owner_url = make_url(postgres).set(username=role, password="ownerpass")
-    _upgrade(owner_url.render_as_string(hide_password=False), "head")
+    # This role owns the ACL and budget tables 0047 changes. The database
+    # owner applies later revisions, including lab_pull disk columns.
+    _upgrade(owner_url.render_as_string(hide_password=False), _IDEMPOTENCY)
+    assert _version(postgres) == _IDEMPOTENCY
+    _upgrade(postgres, "head")
     assert _version(postgres) == _HEAD
     with eng.connect() as cx:
         owner = cx.execute(
