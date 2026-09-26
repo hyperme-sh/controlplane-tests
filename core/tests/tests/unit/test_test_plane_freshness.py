@@ -170,24 +170,93 @@ def test_manifest_not_yet_on_main_is_grace_then_failure() -> None:
     assert "image-manifest" in stale.summary
 
 
-def test_a_newer_main_commit_does_not_reset_the_drift_clock() -> None:
-    """HEAD landed 5 minutes ago. The first missed commit landed 40 minutes ago."""
+def _compare_commit(sha: str, when: datetime, parent: str, *extra_parents: str) -> dict:
+    stamp = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+    parents = [{"sha": parent}, *({"sha": extra} for extra in extra_parents)]
+    return {
+        "sha": sha,
+        "commit": {
+            "author": {"date": "2026-09-26T15:10:00Z"},
+            "committer": {"date": stamp},
+        },
+        "parents": parents,
+    }
 
-    times = [
-        NOW - timedelta(minutes=40),
-        NOW - timedelta(minutes=5),
-    ]
-    started = freshness.resolve_drift_start(OLD, MAIN, times[-1], times)
-    assert started == times[0]
+
+def test_merge_within_grace_ignores_older_second_parent_commits() -> None:
+    """Branch commits are 50 minutes old. The merge landed 10 minutes ago."""
+
+    branch = "d" * 40
+    landed = NOW - timedelta(minutes=10)
+    document = {
+        "total_commits": 2,
+        "commits": [
+            _compare_commit(branch, NOW - timedelta(minutes=50), "e" * 40),
+            _compare_commit(MAIN, landed, OLD, branch),
+        ],
+    }
+    drift = freshness.drift_from_compare(200, document, OLD, MAIN, landed)
+    assert drift.known
+    assert drift.at == landed
     decision = _decide(
         manifest_sha=OLD,
         expected={},
-        main_committed_at=times[-1],
-        drift_started_at=started,
+        main_committed_at=landed,
+        drift_started_at=drift.at,
+    )
+    assert decision.ok
+    assert decision.status == "within_grace"
+
+
+def test_a_newer_main_commit_does_not_reset_the_drift_clock() -> None:
+    """HEAD landed 10 minutes ago. The first missed merge landed 40 minutes ago."""
+
+    branch = "d" * 40
+    landed = NOW - timedelta(minutes=10)
+    first_land = NOW - timedelta(minutes=40)
+    document = {
+        "total_commits": 3,
+        "commits": [
+            _compare_commit(branch, NOW - timedelta(minutes=50), "e" * 40),
+            _compare_commit("f" * 40, first_land, OLD),
+            _compare_commit(MAIN, landed, "f" * 40, branch),
+        ],
+    }
+    drift = freshness.drift_from_compare(200, document, OLD, MAIN, landed)
+    assert drift.known
+    assert drift.at == first_land
+    decision = _decide(
+        manifest_sha=OLD,
+        expected={},
+        main_committed_at=landed,
+        drift_started_at=drift.at,
         services=(_edge(),),
     )
     assert not decision.ok
     assert decision.status == "behind"
+
+
+def test_compare_failure_does_not_grant_grace_from_main_head() -> None:
+    truncated = freshness.drift_from_compare(
+        200, {"total_commits": 300, "commits": []}, OLD, MAIN, NOW
+    )
+    assert not truncated.known
+    assert "truncated" in truncated.detail
+    failed = freshness.drift_from_compare(502, None, OLD, MAIN, NOW)
+    assert not failed.known
+    assert "HTTP 502" in failed.detail
+    decision = _decide(
+        manifest_sha=OLD,
+        expected={},
+        drift_known=False,
+        drift_detail=failed.detail,
+        drift_started_at=NOW,
+        main_committed_at=NOW - timedelta(minutes=5),
+    )
+    assert not decision.ok
+    assert decision.status == "behind"
+    assert "drift unknown" in decision.summary
+    assert "grace not applied" in decision.summary
 
 
 def test_edge_unreachable_fails_immediately() -> None:
@@ -270,15 +339,7 @@ def test_parse_service_does_not_keep_an_upstream_error_string() -> None:
     assert "password" not in freshness._describe_unreachable(parsed)
 
 
-def test_compare_uses_the_oldest_committer_time() -> None:
-    document = {
-        "commits": [
-            {"commit": {"committer": {"date": "2026-09-26T17:20:00Z"}}},
-            {"commit": {"committer": {"date": "2026-09-26T17:55:00Z"}}},
-        ]
-    }
-    times = freshness.compare_committer_times(document)
-    assert times[0] == datetime(2026, 9, 26, 17, 20, tzinfo=timezone.utc)
+def test_commit_sha_and_time_uses_the_committer_date() -> None:
     sha, when = freshness.commit_sha_and_time(
         {
             "sha": MAIN,
@@ -287,6 +348,52 @@ def test_compare_uses_the_oldest_committer_time() -> None:
     )
     assert sha == MAIN
     assert when == datetime(2026, 9, 26, 17, 55, tzinfo=timezone.utc)
+
+
+def test_request_retries_once_after_a_blip(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def once(url, token, timeout, accept="application/json"):
+        del url, token, timeout, accept
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 0, None
+        return 200, {"ok": True}
+
+    slept: list[float] = []
+    monkeypatch.setattr(freshness, "_request_json_once", once)
+    monkeypatch.setenv("FRESHNESS_RETRY_DELAY_S", "10")
+    status, body = freshness._request_json(
+        "https://api.github.com/repos/FyberLabs/panopticon/commits/main",
+        "token",
+        1,
+        sleep=lambda delay: slept.append(delay),
+    )
+    assert status == 200
+    assert body == {"ok": True}
+    assert calls["n"] == 2
+    assert slept == [10.0]
+
+
+def test_request_stops_after_one_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def once(url, token, timeout, accept="application/json"):
+        del url, token, timeout, accept
+        calls["n"] += 1
+        return 0, None
+
+    monkeypatch.setattr(freshness, "_request_json_once", once)
+    monkeypatch.setenv("FRESHNESS_RETRY_DELAY_S", "0")
+    status, body = freshness._request_json(
+        "https://api.github.com/repos/FyberLabs/panopticon/commits/main",
+        None,
+        1,
+        sleep=lambda delay: None,
+    )
+    assert status == 0
+    assert body is None
+    assert calls["n"] == 2
 
 
 def test_request_json_refuses_plaintext() -> None:

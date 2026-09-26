@@ -142,6 +142,18 @@ def test_shared_env_does_not_carry_the_deploy_sha() -> None:
     assert vm.count("HYPERMESH_REVISION: ${PANOPTICON_IMAGE_TAG:-}") == 2
 
 
+def test_image_manifest_contract_is_documented() -> None:
+    text = (REPO_ROOT / "docs" / "image-manifest.md").read_text(encoding="utf-8")
+    assert "deploy/image-manifest" in text
+    assert "image-manifest.json" in text
+    assert "built_git_sha" in text
+    assert "built_at" in text
+    assert "deploy/test" in text
+    assert "force: false" in text
+    vm = (REPO_ROOT / "docker-compose.vm.yaml").read_text(encoding="utf-8")
+    assert vm.count("EDGE_VERSIONS_ACCESS: ${EDGE_VERSIONS_ACCESS:-public}") == 1
+
+
 def test_digest_header_is_the_registry_digest() -> None:
     digest = "sha256:" + "ef" * 32
     assert plan.digest_from_headers({"Docker-Content-Digest": digest}) == digest
@@ -173,7 +185,7 @@ def test_push_manifest_branch_commits_the_file_and_does_not_move_deploy_test() -
         if url.endswith("/git/ref/heads/deploy/image-manifest"):
             return 200, {"object": {"sha": "previous", "type": "commit"}}
         if url.endswith("/git/refs/heads/deploy/image-manifest"):
-            assert payload == {"sha": "commitsha", "force": True}
+            assert payload == {"sha": "commitsha", "force": False}
             return 200, {"object": {"sha": "commitsha"}}
         raise AssertionError(url)
 
