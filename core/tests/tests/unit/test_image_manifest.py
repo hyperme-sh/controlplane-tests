@@ -47,21 +47,34 @@ def test_manifest_keeps_carried_digests_and_records_rebuilt_ones() -> None:
     carried = "sha256:" + "ab" * 32
     rebuilt = "sha256:" + "cd" * 32
     sha = "12" * 20
+    baked = "ab" * 20
     document = plan.image_manifest_document(
         git_sha=sha,
         services=["auth-service", "controlplane-edge"],
         digests={"auth-service": carried, "controlplane-edge": rebuilt},
+        identities={
+            "auth-service": {"built_git_sha": baked, "built_at": "2026-09-26T17:00:00Z"},
+            "controlplane-edge": {"built_git_sha": sha, "built_at": "2026-09-26T18:00:00Z"},
+        },
         generated_at="2026-09-26T18:00:00Z",
     )
     rows = {row["service"]: row for row in document["services"]}
     assert rows["auth-service"]["digest"] == carried
     assert rows["auth-service"]["digest"] != sha
+    assert rows["auth-service"]["built_git_sha"] == baked
+    assert rows["auth-service"]["built_at"] == "2026-09-26T17:00:00Z"
+    assert rows["auth-service"]["tag"] == sha
     assert rows["controlplane-edge"]["image"] == f"ghcr.io/fyberlabs/controlplane-edge@{rebuilt}"
     assert rows["controlplane-edge"]["tag"] == sha
+    assert rows["controlplane-edge"]["built_git_sha"] == sha
     assert [row["service"] for row in document["services"]] == [
         "auth-service",
         "controlplane-edge",
     ]
+
+
+def _identity(sha: str, stamp: str = "2026-09-26T18:00:00Z") -> dict[str, str]:
+    return {"built_git_sha": sha, "built_at": stamp}
 
 
 def test_manifest_refuses_a_missing_or_non_digest_value() -> None:
@@ -71,6 +84,7 @@ def test_manifest_refuses_a_missing_or_non_digest_value() -> None:
             git_sha=sha,
             services=["auth-service", "acl-service"],
             digests={"auth-service": "sha256:" + "ab" * 32},
+            identities={"auth-service": _identity(sha), "acl-service": _identity(sha)},
             generated_at="2026-09-26T18:00:00Z",
         )
     with pytest.raises(SystemExit, match="missing digests"):
@@ -78,8 +92,54 @@ def test_manifest_refuses_a_missing_or_non_digest_value() -> None:
             git_sha=sha,
             services=["auth-service"],
             digests={"auth-service": "test"},
+            identities={"auth-service": _identity(sha)},
             generated_at="2026-09-26T18:00:00Z",
         )
+
+
+def test_manifest_refuses_a_row_without_baked_identity() -> None:
+    sha = "12" * 20
+    with pytest.raises(SystemExit, match="missing baked identity"):
+        plan.image_manifest_document(
+            git_sha=sha,
+            services=["auth-service"],
+            digests={"auth-service": "sha256:" + "ab" * 32},
+            identities={"auth-service": {"built_git_sha": sha, "built_at": ""}},
+            generated_at="2026-09-26T18:00:00Z",
+        )
+
+
+def test_baked_identity_reads_the_image_config_env() -> None:
+    baked = "ab" * 20
+    config = {
+        "config": {
+            "Env": [
+                "PATH=/usr/bin",
+                "GIT_SHA=",
+                f"GIT_SHA={baked}",
+                "BUILT_AT=2026-09-26T18:00:00Z",
+            ]
+        }
+    }
+    assert plan.baked_identity(config) == (baked, "2026-09-26T18:00:00Z")
+    source_only = {
+        "config": {
+            "Env": [
+                "SOURCE_SHA=" + ("cd" * 20),
+                "BUILT_AT=2026-09-26T17:00:00Z",
+            ]
+        }
+    }
+    assert plan.baked_identity(source_only) == ("cd" * 20, "2026-09-26T17:00:00Z")
+    assert plan.baked_identity({"config": {"Env": ["GIT_SHA=test"]}}) == ("", "")
+
+
+def test_shared_env_does_not_carry_the_deploy_sha() -> None:
+    for relative in ("docker-compose.yaml", "docker-compose.vm.yaml"):
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "PANOPTICON_IMAGE_TAG: ${PANOPTICON_IMAGE_TAG:-}" not in text
+    vm = (REPO_ROOT / "docker-compose.vm.yaml").read_text(encoding="utf-8")
+    assert vm.count("HYPERMESH_REVISION: ${PANOPTICON_IMAGE_TAG:-}") == 2
 
 
 def test_digest_header_is_the_registry_digest() -> None:

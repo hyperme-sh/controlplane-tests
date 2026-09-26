@@ -16,6 +16,9 @@ MAIN = "a" * 40
 OLD = "b" * 40
 OLDER = "c" * 40
 STAMP = "2026-09-26T17:00:00Z"
+NEW_STAMP = "2026-09-26T17:40:00Z"
+CARRIED = "sha256:" + "ab" * 32
+REBUILT = "sha256:" + "cd" * 32
 GRACE = timedelta(minutes=30)
 
 
@@ -32,10 +35,25 @@ def _load():
 freshness = _load()
 
 
-def _edge(sha: str = OLD):
+def _edge(sha: str = OLD, built_at: str = STAMP):
     return freshness.ServiceVersion(
-        "controlplane-edge", git_sha=sha, built_at=STAMP
+        "controlplane-edge", git_sha=sha, built_at=built_at
     )
+
+
+def _row(service: str, digest: str, sha: str, built_at: str = STAMP):
+    return freshness.ExpectedImage(service, digest, sha, built_at)
+
+
+def _carried_expected():
+    """Manifest for main. Both images were carried, so the bake is still OLD."""
+
+    return {
+        "controlplane-edge": _row("controlplane-edge", CARRIED, OLD),
+        "auth-service": _row("auth-service", CARRIED, OLD),
+        "marketplace": _row("marketplace", CARRIED, OLD),
+        "turn-service": _row("turn-service", REBUILT, MAIN, NEW_STAMP),
+    }
 
 
 def _decide(**overrides):
@@ -46,6 +64,9 @@ def _decide(**overrides):
         drift_started_at=NOW - timedelta(minutes=10),
         edge=_edge(),
         services=(_edge(),),
+        expected=_carried_expected(),
+        manifest_sha=MAIN,
+        manifest_error=None,
         edge_error=None,
         max_lag=GRACE,
     )
@@ -53,11 +74,14 @@ def _decide(**overrides):
     return freshness.evaluate_freshness(**params)
 
 
-def test_in_sync_when_edge_and_peers_match_main() -> None:
-    edge = _edge(MAIN)
+def test_docs_only_move_stays_green_when_digests_match() -> None:
+    """Carried images report an old bake. The manifest for main records that bake."""
+
+    edge = _edge(OLD)
+    auth = freshness.ServiceVersion("auth-service", git_sha=OLD, built_at=STAMP)
     decision = _decide(
         edge=edge,
-        services=(edge, freshness.ServiceVersion("auth-service", git_sha=MAIN)),
+        services=(edge, auth),
         main_committed_at=NOW - timedelta(hours=3),
         drift_started_at=NOW - timedelta(hours=3),
     )
@@ -65,35 +89,85 @@ def test_in_sync_when_edge_and_peers_match_main() -> None:
     assert decision.status == "in_sync"
     assert decision.behind == ()
     assert "services behind: none" in decision.summary
+    assert OLD != MAIN
 
 
-def test_within_grace_lists_services_and_stays_green() -> None:
-    auth = freshness.ServiceVersion("auth-service", git_sha=OLD, built_at=STAMP)
-    decision = _decide(services=(_edge(), auth))
+def test_marketplace_process_name_joins_the_image_row() -> None:
+    edge = _edge(OLD)
+    market = freshness.ServiceVersion("marketplace-service", git_sha=OLD, built_at=STAMP)
+    decision = _decide(edge=edge, services=(edge, market))
+    assert decision.ok
+    assert decision.status == "in_sync"
+    assert freshness.image_key("marketplace-service") == "marketplace"
+
+
+def test_reported_digest_matches_even_when_the_bake_differs() -> None:
+    edge = freshness.ServiceVersion(
+        "controlplane-edge",
+        git_sha=OLDER,
+        built_at="2026-09-26T16:00:00Z",
+        image_digest=CARRIED,
+    )
+    decision = _decide(edge=edge, services=(edge,))
+    assert decision.ok
+    assert decision.status == "in_sync"
+
+
+def test_within_grace_lists_the_expected_digest_and_stays_green() -> None:
+    edge = _edge(OLD)
+    auth = freshness.ServiceVersion("auth-service", git_sha=OLDER, built_at=STAMP)
+    decision = _decide(edge=edge, services=(edge, auth))
     assert decision.ok
     assert decision.status == "within_grace"
-    assert decision.behind == ("controlplane-edge", "auth-service")
-    assert "auth-service git_sha=" + OLD in decision.summary
+    assert decision.behind == ("auth-service",)
+    assert f"expected digest={CARRIED}" in decision.summary
+    assert "auth-service" in decision.summary
 
 
-def test_behind_more_than_thirty_minutes_fails_and_names_services() -> None:
+def test_behind_more_than_thirty_minutes_fails_and_names_the_digest() -> None:
     started = NOW - timedelta(minutes=45)
+    edge = _edge(MAIN, NEW_STAMP)
     auth = freshness.ServiceVersion(
         "auth-service",
         git_sha=OLD,
         built_at=STAMP,
-        image_digest="sha256:" + "ab" * 32,
+        image_digest="sha256:" + "ef" * 32,
     )
+    expected = _carried_expected()
+    expected["controlplane-edge"] = _row("controlplane-edge", REBUILT, MAIN, NEW_STAMP)
+    expected["auth-service"] = _row("auth-service", CARRIED, MAIN, NEW_STAMP)
     decision = _decide(
+        edge=edge,
         main_committed_at=started,
         drift_started_at=started,
-        services=(_edge(), auth),
+        services=(edge, auth),
+        expected=expected,
     )
     assert not decision.ok
     assert decision.status == "behind"
     assert "BEHIND" in decision.summary
     assert "auth-service" in decision.summary
-    assert "image_digest=sha256:" + "ab" * 32 in decision.summary
+    assert f"expected digest={CARRIED}" in decision.summary
+    assert "image_digest=sha256:" + "ef" * 32 in decision.summary
+
+
+def test_manifest_not_yet_on_main_is_grace_then_failure() -> None:
+    fresh = _decide(manifest_sha=OLD, expected={})
+    assert fresh.ok
+    assert fresh.status == "within_grace"
+    assert fresh.behind == ("image-manifest",)
+    assert "does not record main" in fresh.summary
+
+    started = NOW - timedelta(minutes=45)
+    stale = _decide(
+        manifest_sha=OLD,
+        expected={},
+        main_committed_at=started,
+        drift_started_at=started,
+    )
+    assert not stale.ok
+    assert stale.status == "behind"
+    assert "image-manifest" in stale.summary
 
 
 def test_a_newer_main_commit_does_not_reset_the_drift_clock() -> None:
@@ -106,6 +180,8 @@ def test_a_newer_main_commit_does_not_reset_the_drift_clock() -> None:
     started = freshness.resolve_drift_start(OLD, MAIN, times[-1], times)
     assert started == times[0]
     decision = _decide(
+        manifest_sha=OLD,
+        expected={},
         main_committed_at=times[-1],
         drift_started_at=started,
         services=(_edge(),),
@@ -122,24 +198,23 @@ def test_edge_unreachable_fails_immediately() -> None:
     assert decision.unreachable == ("controlplane-edge",)
 
 
-def test_edge_on_main_fails_when_a_service_is_still_behind() -> None:
-    edge = _edge(MAIN)
+def test_rebuilt_service_inside_grace_is_listed_not_failed() -> None:
+    edge = _edge(OLD)
+    turn = freshness.ServiceVersion("turn-service", git_sha=OLD, built_at=STAMP)
     decision = _decide(
         edge=edge,
-        services=(
-            edge,
-            freshness.ServiceVersion("turn-service", git_sha=OLD, built_at=STAMP),
-        ),
+        services=(edge, turn),
         main_committed_at=NOW - timedelta(minutes=5),
         drift_started_at=NOW - timedelta(minutes=5),
     )
-    assert not decision.ok
+    assert decision.ok
+    assert decision.status == "within_grace"
     assert decision.behind == ("turn-service",)
-    assert "turn-service" in decision.summary
+    assert f"expected digest={REBUILT}" in decision.summary
 
 
-def test_edge_on_main_fails_when_a_peer_does_not_answer() -> None:
-    edge = _edge(MAIN)
+def test_digests_in_sync_fail_when_a_peer_does_not_answer() -> None:
+    edge = _edge(OLD)
     decision = _decide(
         edge=edge,
         services=(edge, freshness.ServiceVersion("oracles-service", error="unreachable")),
@@ -150,6 +225,8 @@ def test_edge_on_main_fails_when_a_peer_does_not_answer() -> None:
 
 def test_peer_blip_during_grace_does_not_fail() -> None:
     decision = _decide(
+        manifest_sha=OLD,
+        expected={},
         services=(_edge(), freshness.ServiceVersion("acl-service", error="unreachable")),
     )
     assert decision.ok
@@ -163,13 +240,34 @@ def test_unusable_edge_sha_is_unreachable() -> None:
     assert decision.status == "unreachable"
 
 
+def test_parse_manifest_keeps_the_baked_pair_next_to_the_digest() -> None:
+    sha, rows = freshness.parse_manifest(
+        {
+            "git_sha": MAIN,
+            "services": [
+                {
+                    "service": "auth-service",
+                    "digest": CARRIED,
+                    "built_git_sha": OLD,
+                    "built_at": STAMP,
+                    "tag": MAIN,
+                }
+            ],
+        }
+    )
+    assert sha == MAIN
+    assert rows["auth-service"].digest == CARRIED
+    assert rows["auth-service"].built_git_sha == OLD
+    assert rows["auth-service"].built_at == STAMP
+
+
 def test_parse_service_does_not_keep_an_upstream_error_string() -> None:
     parsed = freshness.parse_service(
         {"service": "turn-service", "error": "postgresql://user:password@db/controlplane"},
         fallback="turn-service",
     )
     assert parsed.error == "unreachable"
-    assert "password" not in freshness._describe(parsed)
+    assert "password" not in freshness._describe_unreachable(parsed)
 
 
 def test_compare_uses_the_oldest_committer_time() -> None:
