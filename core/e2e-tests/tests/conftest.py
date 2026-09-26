@@ -7,17 +7,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from panopticon_tests.fixtures.kafka import await_kafka_controller_ready
 from panopticon_tests.fixtures.postgres import (
     async_db_url,
     normalize_sync_sqlalchemy_url,
     run_alembic_upgrade,
 )
-
-try:
-    from testcontainers.kafka import KafkaContainer
-except ImportError:
-    KafkaContainer = None  # type: ignore[misc, assignment]
 
 
 @pytest.fixture(scope="session")
@@ -66,32 +60,6 @@ async def async_session(async_engine) -> AsyncSession:
     factory = async_sessionmaker(async_engine, expire_on_commit=False)
     async with factory() as session:
         yield session
-
-
-@pytest.fixture(scope="session")
-def kafka_bootstrap(require_docker: None):
-    if KafkaContainer is None:
-        pytest.skip("Kafka testcontainer not available")
-    with KafkaContainer(image="confluentinc/cp-kafka:7.6.1") as kafka:
-        yield kafka.get_bootstrap_server()
-
-
-@pytest_asyncio.fixture
-async def kafka_topic_created(kafka_bootstrap: str):
-    from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-
-    from controlplane_events.topics import CONTROLPLANE_EVENTS_V1
-
-    admin = AIOKafkaAdminClient(bootstrap_servers=kafka_bootstrap)
-    await admin.start()
-    await await_kafka_controller_ready(admin)
-    try:
-        await admin.create_topics(
-            [NewTopic(name=CONTROLPLANE_EVENTS_V1, num_partitions=1, replication_factor=1)]
-        )
-    finally:
-        await admin.close()
-    yield CONTROLPLANE_EVENTS_V1
 
 
 def pytest_configure(config):

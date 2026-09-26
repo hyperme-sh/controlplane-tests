@@ -314,7 +314,7 @@ def test_every_app_service_restarts(overlay: dict) -> None:
 
     hypermesh-service exited on a bad schema and sat dead for fourteen hours
     while the other twenty containers reported healthy, because a restart policy
-    is set on postgres/redis/kafka/keycloak and on nothing else. The VM is
+    is set on postgres/redis/keycloak and on nothing else. The VM is
     unattended, so "it stopped" has to become visible or self-correcting.
 
     App services with no ``profiles`` key stay on ``unless-stopped``. A service
@@ -354,11 +354,10 @@ def test_every_app_service_is_capped(overlay: dict) -> None:
     uncapped = sorted(n for n, c in _app_services(overlay).items() if not c.get("mem_limit"))
     assert not uncapped, f"no mem_limit on: {', '.join(uncapped)}"
 
-    # The JVMs are the two largest and are container-aware, so the cap also caps
-    # their heap. Postgres is deliberately uncapped: page cache counts against a
-    # cgroup, so a limit there caps caching and vacuum dies first.
-    for name in ("kafka", "keycloak"):
-        assert overlay["services"][name].get("mem_limit"), f"{name} is uncapped"
+    # Keycloak's JVM is container-aware, so the cap also caps its heap.
+    # Postgres is deliberately uncapped: page cache counts against a cgroup,
+    # so a limit there caps caching and vacuum dies first.
+    assert overlay["services"]["keycloak"].get("mem_limit"), "keycloak is uncapped"
     assert not overlay["services"]["postgres"].get("mem_limit"), (
         "capping Postgres limits how much of the database it may cache"
     )

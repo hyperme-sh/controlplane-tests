@@ -35,18 +35,25 @@ async def test_redis_ping(redis_url: str):
 
 
 @pytest.mark.asyncio
-async def test_kafka_topic_create(kafka_bootstrap: str, kafka_topic_created: str):
-    from aiokafka import AIOKafkaProducer
+async def test_events_table_round_trip(async_session):
+    from controlplane_events.envelope import ControlPlaneEventEnvelope
+    from controlplane_events.store import insert_event
 
-    producer = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
-    await producer.start()
-    try:
-        await producer.send_and_wait(
-            kafka_topic_created,
-            value=b'{"hello":"world"}',
+    envelope = ControlPlaneEventEnvelope(
+        event_type="test.ping.v1",
+        service="panopticon-tests",
+        payload={"hello": "world"},
+    )
+    event_id = await insert_event(async_session, envelope)
+    await async_session.commit()
+    row = (
+        await async_session.execute(
+            text("SELECT event_type, envelope->>'service' FROM controlplane_events WHERE id = :id"),
+            {"id": event_id},
         )
-    finally:
-        await producer.stop()
+    ).one()
+    assert row[0] == "test.ping.v1"
+    assert row[1] == "panopticon-tests"
 
 
 @pytest.mark.asyncio

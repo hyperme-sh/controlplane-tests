@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "panopticon-e2e-tests"
 version = "0.0.0"
 requires-python = ">=3.13"
-description = "Multi-service Kafka + Postgres integration tests"
+description = "Multi-service Postgres event-bus integration tests"
 dependencies = [
     "panopticon-tests",
     "user-service",
@@ -22,7 +22,6 @@ dependencies = [
     "httpx>=0.28.0",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.2.0",
-    "aiokafka>=0.12.0",
     "testcontainers>=4.9.0",
     "controlplane-edge",
 ]

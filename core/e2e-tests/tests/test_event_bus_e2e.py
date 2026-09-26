@@ -1,4 +1,4 @@
-"""Multi-service + Kafka: user.created → ACL policy; payment.succeeded → tenant upgrade."""
+"""Multi-service Postgres events: user.created → ACL policy; payment.succeeded → tenant upgrade."""
 
 from __future__ import annotations
 
@@ -22,13 +22,10 @@ from auth_service.schemas import AuthMeResponse
 async def test_user_created_acl_policy_and_payment_upgrades_tenant(
     migrated_postgres: str,
     db_async_url: str,
-    kafka_bootstrap: str,
-    kafka_topic_created: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api_config.settings, "database_url", db_async_url)
-    monkeypatch.setattr(api_config.settings, "kafka_bootstrap_servers", kafka_bootstrap)
-    monkeypatch.setattr(api_config.settings, "kafka_events_topic", kafka_topic_created)
+    monkeypatch.setattr(api_config.settings, "azure_service_bus_connection_string", None)
 
     ta = uuid.uuid4()
     ra = uuid.uuid4()
@@ -125,7 +122,7 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
                     assert ur.status_code == 201, ur.text
                     uid = ur.json()["id"]
 
-                await asyncio.sleep(4)
+                await asyncio.sleep(2)
 
                 async with httpx.AsyncClient(
                     transport=transport_a, base_url="http://acl"
@@ -155,7 +152,7 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
                         )
                         assert wr.status_code == 200, wr.text
 
-                await asyncio.sleep(4)
+                await asyncio.sleep(2)
 
     with eng.begin() as cx:
         cx.execute(
