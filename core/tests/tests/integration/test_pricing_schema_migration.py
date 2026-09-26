@@ -261,6 +261,7 @@ def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     assert _nullable(postgres, "hypermesh_leases", "ruleset_version") == "YES"
     assert _nullable(postgres, "hypermesh_leases", "failed_at") == "YES"
     assert _nullable(postgres, "hypermesh_device_health", "disk_free_bytes") == "YES"
+    assert _nullable(postgres, "hypermesh_device_health", "model_cache_evictable_bytes") == "YES"
     assert _nullable(postgres, "hypermesh_catalog", "size_bytes") == "YES"
     assert _nullable(postgres, "hypermesh_jobs", "dispatch_skip_reason") == "YES"
 
