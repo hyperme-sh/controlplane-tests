@@ -18,6 +18,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from testcontainers.postgres import PostgresContainer
 
@@ -312,5 +313,111 @@ def test_duplicate_acl_rules_collapse_before_unique_index(postgres: str) -> None
                 """
             )
         ).scalar_one()
+    assert left == sorted([kept, ids[2]])
+    assert "NULLS NOT DISTINCT" in indexdef
+
+
+def test_duplicate_acl_rules_collapse_as_nobypassrls_owner(postgres: str) -> None:
+    """0047 must dedupe when the table owner is subject to FORCE RLS."""
+
+    _upgrade(postgres, _EVENTS)
+    role = "acl_rule_owner"
+    tenant = uuid.uuid4()
+    eng = create_engine(postgres)
+    with eng.begin() as cx:
+        cx.execute(
+            text(
+                f"""
+                DO $$ BEGIN
+                    CREATE ROLE {role} NOINHERIT NOBYPASSRLS LOGIN PASSWORD 'ownerpass';
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+                """
+            )
+        )
+        flags = cx.execute(
+            text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = :role"),
+            {"role": role},
+        ).one()
+        assert flags == (False, False)
+        cx.execute(
+            text(
+                "INSERT INTO tenants (id, name, is_active) VALUES (CAST(:id AS uuid), :name, true)"
+            ),
+            {"id": str(tenant), "name": f"own-{tenant.hex[:8]}"},
+        )
+        ids = [
+            int(row[0])
+            for row in cx.execute(
+                text(
+                    """
+                    INSERT INTO acl_casbin_rules (tenant_id, ptype, v0, v1, v2)
+                    VALUES
+                        (CAST(:tenant AS uuid), 'p', 'user', 'user_profile', 'read'),
+                        (CAST(:tenant AS uuid), 'p', 'user', 'user_profile', 'read'),
+                        (CAST(:tenant AS uuid), 'p', 'other', 'user_profile', 'read')
+                    RETURNING id
+                    """
+                ),
+                {"tenant": str(tenant)},
+            ).fetchall()
+        ]
+        cx.execute(text(f"ALTER TABLE acl_casbin_rules OWNER TO {role}"))
+        cx.execute(text(f"ALTER TABLE ai_budget_event_audit OWNER TO {role}"))
+        cx.execute(
+            text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON alembic_version TO {role}")
+        )
+        cx.execute(text(f"GRANT USAGE, CREATE ON SCHEMA public TO {role}"))
+        database = make_url(postgres).database
+        cx.execute(text(f'GRANT CONNECT ON DATABASE "{database}" TO {role}'))
+    kept = min(ids[0], ids[1])
+    owner_url = make_url(postgres).set(username=role, password="ownerpass")
+    _upgrade(owner_url.render_as_string(hide_password=False), "head")
+    assert _version(postgres) == _HEAD
+    with eng.connect() as cx:
+        owner = cx.execute(
+            text(
+                """
+                SELECT r.rolname
+                FROM pg_class AS c
+                JOIN pg_roles AS r ON r.oid = c.relowner
+                WHERE c.relname = 'acl_casbin_rules'
+                """
+            )
+        ).scalar_one()
+        rls = cx.execute(
+            text(
+                """
+                SELECT c.relrowsecurity, c.relforcerowsecurity
+                FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relname = 'acl_casbin_rules'
+                """
+            )
+        ).one()
+        left = [
+            int(row[0])
+            for row in cx.execute(
+                text(
+                    """
+                    SELECT id FROM acl_casbin_rules
+                    WHERE tenant_id = CAST(:tenant AS uuid)
+                    ORDER BY id
+                    """
+                ),
+                {"tenant": str(tenant)},
+            ).fetchall()
+        ]
+        indexdef = cx.execute(
+            text(
+                """
+                SELECT indexdef FROM pg_indexes
+                WHERE indexname = 'uq_acl_casbin_rules_identity'
+                """
+            )
+        ).scalar_one()
+    assert owner == role
+    assert rls == (True, True)
     assert left == sorted([kept, ids[2]])
     assert "NULLS NOT DISTINCT" in indexdef

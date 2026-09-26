@@ -682,3 +682,191 @@ def test_register_during_open_insert_still_delivers(migrated_postgres: str) -> N
             {"group": group, "event_id": event_id},
         ).scalar_one()
     assert status == "pending"
+
+
+_REGISTER_GRANTS = """
+GRANT SELECT, INSERT ON controlplane_events TO {role};
+GRANT USAGE, SELECT ON SEQUENCE controlplane_events_id_seq TO {role};
+GRANT SELECT, INSERT, UPDATE, DELETE ON controlplane_event_subscriptions TO {role};
+GRANT SELECT, INSERT, UPDATE, DELETE ON controlplane_event_deliveries TO {role};
+GRANT EXECUTE ON FUNCTION
+    notify_controlplane_event(),
+    deliver_controlplane_event(),
+    register_controlplane_event_consumer(text, text[], text, integer),
+    claim_controlplane_event_deliveries(text, text, integer, integer, bigint[]),
+    replay_controlplane_event_deliveries(text, bigint),
+    prune_controlplane_events(interval)
+TO {role};
+"""
+
+
+def test_nobypassrls_role_can_register_with_event_grants_only(migrated_postgres: str) -> None:
+    """SHARE is taken inside the definer function. The app role has no UPDATE."""
+
+    role = "panopticon_events_register"
+    group = f"reg-role-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.regrole.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    DO $$ BEGIN
+                        CREATE ROLE {role} NOINHERIT NOBYPASSRLS;
+                    EXCEPTION WHEN duplicate_object THEN
+                        NULL;
+                    END $$;
+                    """
+                )
+            )
+            conn.execute(text(_REGISTER_GRANTS.format(role=role)))
+            conn.execute(text(f"GRANT {role} TO CURRENT_USER"))
+            event_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                    VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                    RETURNING id
+                    """
+                ),
+                {
+                    "event_type": event_type,
+                    "envelope": (
+                        f'{{"event_type":"{event_type}","service":"tests","payload":{{}}}}'
+                    ),
+                },
+            ).scalar_one()
+            defn = conn.execute(
+                text(
+                    """
+                    SELECT pg_get_functiondef(
+                        'register_controlplane_event_consumer(text, text[], text, integer)'::regprocedure
+                    )
+                    """
+                )
+            ).scalar_one()
+            assert "SECURITY DEFINER" in defn
+            assert "search_path" in defn
+            assert conn.execute(
+                text("SELECT has_table_privilege(:role, 'controlplane_events', 'UPDATE')"),
+                {"role": role},
+            ).scalar_one() is False
+            assert conn.execute(
+                text("SELECT has_table_privilege(:role, 'controlplane_events', 'DELETE')"),
+                {"role": role},
+            ).scalar_one() is False
+            assert conn.execute(
+                text("SELECT has_table_privilege(:role, 'controlplane_events', 'TRUNCATE')"),
+                {"role": role},
+            ).scalar_one() is False
+
+        with eng.connect() as conn:
+            tx = conn.begin()
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            with pytest.raises(Exception, match="permission denied"):
+                conn.execute(text("LOCK TABLE controlplane_events IN SHARE MODE"))
+            tx.rollback()
+
+        with eng.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            conn.execute(
+                text(
+                    """
+                    SELECT register_controlplane_event_consumer(
+                        :group, string_to_array(:types, ','), 'earliest', 5
+                    )
+                    """
+                ),
+                {"group": group, "types": event_type},
+            )
+            status = conn.execute(
+                text(
+                    """
+                    SELECT status FROM controlplane_event_deliveries
+                    WHERE consumer_group = :group AND event_id = :event_id
+                    """
+                ),
+                {"group": group, "event_id": event_id},
+            ).scalar_one()
+        assert status == "pending"
+    finally:
+        eng.dispose()
+
+
+def test_register_lock_timeout_then_retry_delivers(migrated_postgres: str) -> None:
+    """A publisher that stays open past the lock timeout does not drop the event."""
+
+    group = f"reg-timeout-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.regtimeout.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    hold = eng.connect()
+    hold_tx = hold.begin()
+    try:
+        event_id = hold.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": (
+                    f'{{"event_type":"{event_type}","service":"tests","payload":{{}}}}'
+                ),
+            },
+        ).scalar_one()
+        with eng.connect() as conn:
+            with pytest.raises(Exception, match="lock timeout"):
+                with conn.begin():
+                    conn.execute(
+                        text(
+                            """
+                            SELECT register_controlplane_event_consumer(
+                                :group, string_to_array(:types, ','), 'earliest', 5
+                            )
+                            """
+                        ),
+                        {"group": group, "types": event_type},
+                    )
+        with eng.connect() as conn:
+            subs = conn.execute(
+                text(
+                    """
+                    SELECT count(*) FROM controlplane_event_subscriptions
+                    WHERE consumer_group = :group
+                    """
+                ),
+                {"group": group},
+            ).scalar_one()
+        assert int(subs) == 0
+        hold_tx.commit()
+    finally:
+        if hold_tx.is_active:
+            hold_tx.rollback()
+        hold.close()
+
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                """
+                SELECT register_controlplane_event_consumer(
+                    :group, string_to_array(:types, ','), 'earliest', 5
+                )
+                """
+            ),
+            {"group": group, "types": event_type},
+        )
+        status = conn.execute(
+            text(
+                """
+                SELECT status FROM controlplane_event_deliveries
+                WHERE consumer_group = :group AND event_id = :event_id
+                """
+            ),
+            {"group": group, "event_id": event_id},
+        ).scalar_one()
+    assert status == "pending"
+    eng.dispose()
