@@ -139,7 +139,7 @@ async def test_routing_consumer_dispatches():
 
     # Consumer is not started — call handle_message directly
     consumer = RoutingControlPlaneConsumer(
-        "localhost:9092",
+        "postgresql://localhost/controlplane",
         ["controlplane.events.v1"],
         "test-group",
         {"payment.succeeded.v1": (PaymentSucceededPayload, on_payment)},
@@ -174,7 +174,7 @@ async def test_routing_consumer_skips_tenant_mismatch():
         calls.append(1)
 
     consumer = RoutingControlPlaneConsumer(
-        "localhost:9092",
+        "postgresql://localhost/controlplane",
         ["controlplane.events.v1"],
         "test-group",
         {"payment.succeeded.v1": (PaymentSucceededPayload, on_payment)},
