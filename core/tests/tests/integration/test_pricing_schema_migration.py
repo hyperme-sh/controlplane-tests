@@ -31,7 +31,8 @@ pytestmark = pytest.mark.integration
 _PARENT = "0043_device_host_type"
 _REV = "0044_pricing_schema"
 _LEASE = "0045_lease_failed_at"
-_HEAD = "0046_controlplane_events"
+_EVENTS = "0046_controlplane_events"
+_HEAD = "0047_event_handler_idempotency"
 _TENANT = "8f8e8d8c-7b6a-4a59-8c3d-2e1f0a9b8c7d"
 _HASH = "ab" * 32
 _COMMIT = "cd" * 32
@@ -151,9 +152,12 @@ def test_pricing_revision_revises_device_host_type() -> None:
     lease = script.get_revision(_LEASE)
     assert lease is not None
     assert lease.down_revision == _REV
+    events = script.get_revision(_EVENTS)
+    assert events is not None
+    assert events.down_revision == _LEASE
     head = script.get_revision(_HEAD)
     assert head is not None
-    assert head.down_revision == _LEASE
+    assert head.down_revision == _EVENTS
 
 
 def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:

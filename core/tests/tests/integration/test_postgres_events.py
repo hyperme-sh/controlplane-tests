@@ -130,8 +130,20 @@ async def test_redelivery_then_dead_and_single_claim(migrated_postgres: str) -> 
 @pytest.mark.asyncio
 async def test_two_workers_do_not_double_claim(migrated_postgres: str) -> None:
     publisher = PostgresEventPublisher(migrated_postgres, "tests")
-    await publisher.start()
     group = f"claim-{uuid.uuid4().hex[:8]}"
+    eng = create_engine(migrated_postgres)
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                """
+                SELECT register_controlplane_event_consumer(
+                    :group, string_to_array(:types, ','), 'latest', 5
+                )
+                """
+            ),
+            {"group": group, "types": "test.claim.v1"},
+        )
+    await publisher.start()
     try:
         for i in range(4):
             await publisher.publish(
@@ -141,26 +153,6 @@ async def test_two_workers_do_not_double_claim(migrated_postgres: str) -> None:
             )
     finally:
         await publisher.stop()
-
-    eng = create_engine(migrated_postgres)
-    claim_type = "test.claim.v1"
-    with eng.begin() as conn:
-        conn.execute(
-            text("SELECT fanout_controlplane_event_deliveries(:group, 5)"),
-            {"group": group},
-        )
-        conn.execute(
-            text(
-                """
-                DELETE FROM controlplane_event_deliveries AS d
-                USING controlplane_events AS e
-                WHERE d.event_id = e.id
-                  AND d.consumer_group = :group
-                  AND e.event_type <> :event_type
-                """
-            ),
-            {"group": group, "event_type": claim_type},
-        )
 
     barrier = threading.Barrier(2)
     found: dict[str, list[int]] = {}
@@ -260,6 +252,12 @@ async def test_bus_policy_ignores_tenant_guc(migrated_postgres: str) -> None:
             )
         )
         conn.execute(text(f"GRANT USAGE, SELECT ON SEQUENCE controlplane_events_id_seq TO {role}"))
+        conn.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION notify_controlplane_event(), "
+                f"deliver_controlplane_event() TO {role}"
+            )
+        )
         conn.execute(text(f"GRANT {role} TO CURRENT_USER"))
         conn.execute(text(f"SET ROLE {role}"))
         conn.execute(
@@ -330,16 +328,6 @@ def test_prune_function_removes_old_terminal_events(migrated_postgres: str) -> N
         conn.execute(
             text(
                 """
-                INSERT INTO controlplane_event_cursors (consumer_group, last_event_id)
-                VALUES ('prune-test', :id)
-                ON CONFLICT (consumer_group) DO UPDATE SET last_event_id = EXCLUDED.last_event_id
-                """
-            ),
-            {"id": event_id},
-        )
-        conn.execute(
-            text(
-                """
                 INSERT INTO controlplane_event_deliveries (
                     event_id, consumer_group, status, attempts, max_attempts
                 )
@@ -358,3 +346,152 @@ def test_prune_function_removes_old_terminal_events(migrated_postgres: str) -> N
         ).scalar_one()
     assert int(removed) >= 1
     assert int(left) == 0
+
+
+def test_uncommitted_insert_does_not_skip_an_earlier_id(migrated_postgres: str) -> None:
+    """tx A holds id 1, tx B commits id 2, then A commits. Both get a delivery row."""
+
+    group = f"gap-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.gap.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                """
+                SELECT register_controlplane_event_consumer(
+                    :group, string_to_array(:types, ','), 'latest', 5
+                )
+                """
+            ),
+            {"group": group, "types": event_type},
+        )
+
+    hold = eng.connect()
+    later = eng.connect()
+    hold_tx = hold.begin()
+    try:
+        first_id = hold.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}","service":"tests","payload":{{"n":1}}}}',
+            },
+        ).scalar_one()
+        later_tx = later.begin()
+        second_id = later.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                RETURNING id
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}","service":"tests","payload":{{"n":2}}}}',
+            },
+        ).scalar_one()
+        later_tx.commit()
+        hold_tx.commit()
+    finally:
+        hold.close()
+        later.close()
+
+    with eng.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT event_id, status
+                FROM controlplane_event_deliveries
+                WHERE consumer_group = :group
+                  AND event_id IN (:first_id, :second_id)
+                ORDER BY event_id
+                """
+            ),
+            {"group": group, "first_id": first_id, "second_id": second_id},
+        ).fetchall()
+    assert [int(row[0]) for row in rows] == [int(first_id), int(second_id)]
+    assert {row[1] for row in rows} == {"pending"}
+
+
+def test_expired_lease_at_max_attempts_is_dead(migrated_postgres: str) -> None:
+    group = f"lease-{uuid.uuid4().hex[:8]}"
+    event_type = f"test.lease.{uuid.uuid4().hex[:8]}.v1"
+    eng = create_engine(migrated_postgres)
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                """
+                SELECT register_controlplane_event_consumer(
+                    :group, string_to_array(:types, ','), 'latest', 2
+                )
+                """
+            ),
+            {"group": group, "types": event_type},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO controlplane_events (event_type, tenant_id, envelope)
+                VALUES (:event_type, NULL, CAST(:envelope AS jsonb))
+                """
+            ),
+            {
+                "event_type": event_type,
+                "envelope": f'{{"event_type":"{event_type}","service":"tests","payload":{{}}}}',
+            },
+        )
+
+        def _expire_and_claim(worker: str) -> list:
+            conn.execute(
+                text(
+                    """
+                    UPDATE controlplane_event_deliveries
+                    SET lease_expires_at = now() - interval '1 second'
+                    WHERE consumer_group = :group AND status = 'claimed'
+                    """
+                ),
+                {"group": group},
+            )
+            return conn.execute(
+                text(
+                    """
+                    SELECT event_id, attempts
+                    FROM claim_controlplane_event_deliveries(:group, :worker, 1, 30)
+                    """
+                ),
+                {"group": group, "worker": worker},
+            ).fetchall()
+
+        first = conn.execute(
+            text(
+                """
+                SELECT event_id, attempts
+                FROM claim_controlplane_event_deliveries(:group, 'worker-a', 1, 30)
+                """
+            ),
+            {"group": group},
+        ).fetchall()
+        assert len(first) == 1
+        assert int(first[0][1]) == 1
+        second = _expire_and_claim("worker-b")
+        assert len(second) == 1
+        assert int(second[0][1]) == 2
+        third = _expire_and_claim("worker-c")
+        assert third == []
+        status = conn.execute(
+            text(
+                """
+                SELECT status FROM controlplane_event_deliveries
+                WHERE consumer_group = :group
+                """
+            ),
+            {"group": group},
+        ).scalar_one()
+    assert status == "dead"

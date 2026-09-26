@@ -326,7 +326,15 @@ def test_every_app_service_restarts(overlay: dict) -> None:
     app = _app_services(overlay)
     assert len(app) >= 15, f"only found {len(app)} app services, the scan is wrong"
 
-    always_on = {n: c for n, c in app.items() if "profiles" not in c}
+    # controlplane-migrate must exit 0 and stay stopped. unless-stopped would
+    # start another alembic upgrade as soon as the successful one finished.
+    one_shot = {"controlplane-migrate"}
+    for name in one_shot:
+        assert app[name].get("restart") == "no", f"{name} must not restart after success"
+
+    always_on = {
+        n: c for n, c in app.items() if "profiles" not in c and n not in one_shot
+    }
     manual = {n: c for n, c in app.items() if "profiles" in c}
 
     missing = sorted(n for n, c in always_on.items() if c.get("restart") != "unless-stopped")
