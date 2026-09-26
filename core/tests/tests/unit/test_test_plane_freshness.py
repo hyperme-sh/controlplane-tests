@@ -236,6 +236,100 @@ def test_a_newer_main_commit_does_not_reset_the_drift_clock() -> None:
     assert decision.status == "behind"
 
 
+def test_stuck_vm_is_stale_when_a_newer_main_commit_lands() -> None:
+    """B lands at t0, C at t0+20m, the VM stays on A. At t0+45m the run is stale.
+
+    The edge image is carried through B and C, so the edge's own digest still
+    matches the tip. The auth image changed at B and the VM never refreshed.
+    Anchoring on main (C) would call this 25 minutes of drift and stay green.
+    """
+
+    t0 = NOW - timedelta(minutes=45)
+    c_land = t0 + timedelta(minutes=20)
+    sha_a = "1" * 40
+    sha_b = "2" * 40
+    digest_edge = "sha256:" + "11" * 32
+    digest_auth_old = "sha256:" + "22" * 32
+    digest_auth_new = "sha256:" + "33" * 32
+
+    def published(git_sha: str, auth_digest: str, auth_bake: str) -> freshness.PublishedManifest:
+        return freshness.PublishedManifest(
+            git_sha,
+            {
+                "controlplane-edge": freshness.ExpectedImage(
+                    "controlplane-edge", digest_edge, OLD, STAMP
+                ),
+                "auth-service": freshness.ExpectedImage(
+                    "auth-service", auth_digest, auth_bake, STAMP
+                ),
+            },
+        )
+
+    history = (
+        published(MAIN, digest_auth_new, MAIN),
+        published(sha_b, digest_auth_new, sha_b),
+        published(sha_a, digest_auth_old, OLD),
+    )
+    edge = freshness.ServiceVersion(
+        "controlplane-edge", git_sha=OLD, built_at=STAMP, image_digest=digest_edge
+    )
+    auth = freshness.ServiceVersion(
+        "auth-service", git_sha=OLD, built_at=STAMP, image_digest=digest_auth_old
+    )
+    anchor = freshness.newest_matching_manifest(history, (edge, auth))
+    assert anchor is not None
+    assert anchor.git_sha == sha_a
+
+    document = {
+        "total_commits": 2,
+        "commits": [
+            _compare_commit(sha_b, t0, sha_a),
+            _compare_commit(MAIN, c_land, sha_b),
+        ],
+    }
+    drift = freshness.drift_from_compare(200, document, anchor.git_sha, MAIN, c_land)
+    assert drift.known
+    assert drift.at == t0
+    decision = _decide(
+        now=NOW,
+        edge=edge,
+        services=(edge, auth),
+        expected=dict(history[0].rows),
+        manifest_sha=MAIN,
+        main_committed_at=c_land,
+        drift_started_at=drift.at,
+    )
+    assert not decision.ok
+    assert decision.status == "behind"
+
+
+def test_no_matching_manifest_inside_the_window() -> None:
+    digest = "sha256:" + "ab" * 32
+    other = "sha256:" + "cd" * 32
+    edge = freshness.ServiceVersion(
+        "controlplane-edge", git_sha=OLD, built_at=STAMP, image_digest=digest
+    )
+    matched = freshness.PublishedManifest(
+        "1" * 40,
+        {
+            "controlplane-edge": freshness.ExpectedImage(
+                "controlplane-edge", digest, OLD, STAMP
+            )
+        },
+    )
+    filler = freshness.PublishedManifest(
+        "2" * 40,
+        {
+            "controlplane-edge": freshness.ExpectedImage(
+                "controlplane-edge", other, MAIN, STAMP
+            )
+        },
+    )
+    hidden = (filler,) * freshness.MANIFEST_HISTORY_LIMIT + (matched,)
+    assert freshness.newest_matching_manifest(hidden, (edge,)) is None
+    assert freshness.newest_matching_manifest((matched, filler), (edge,)) == matched
+
+
 def test_compare_failure_does_not_grant_grace_from_main_head() -> None:
     truncated = freshness.drift_from_compare(
         200, {"total_commits": 300, "commits": []}, OLD, MAIN, NOW

@@ -150,8 +150,15 @@ def test_image_manifest_contract_is_documented() -> None:
     assert "built_at" in text
     assert "deploy/test" in text
     assert "force: false" in text
+    assert "EDGE_VERSIONS_ACCESS=off" in text
+    assert "terraform/panopticon" in text
+    deploy = (REPO_ROOT / "docs" / "deploy-vm.md").read_text(encoding="utf-8")
+    assert "Production must set `EDGE_VERSIONS_ACCESS=off`" in deploy
+    example = (REPO_ROOT / ".env.vm.example").read_text(encoding="utf-8")
+    assert "Production must set EDGE_VERSIONS_ACCESS=off" in example
     vm = (REPO_ROOT / "docker-compose.vm.yaml").read_text(encoding="utf-8")
     assert vm.count("EDGE_VERSIONS_ACCESS: ${EDGE_VERSIONS_ACCESS:-public}") == 1
+    assert "fails open" in vm
 
 
 def test_digest_header_is_the_registry_digest() -> None:
