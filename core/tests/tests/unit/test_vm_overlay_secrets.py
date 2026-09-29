@@ -33,7 +33,6 @@ REQUIRED_IN_SHARED_ANCHOR = (
     "API_KEY_EXCHANGE_JWT_SECRET",
     "HYPERMESH_INTERNAL_TOKEN",
     "PAYMENT_INTERNAL_TOKEN",
-    "AIUDITOR_INTERNAL_TOKEN",
 )
 
 # Optional at boot, but must still be declared or payment-service cannot see them.
@@ -380,3 +379,16 @@ def test_every_app_service_is_capped(overlay: dict) -> None:
     assert not overlay["services"]["postgres"].get("mem_limit"), (
         "capping Postgres limits how much of the database it may cache"
     )
+
+
+def test_aiuditor_token_is_optional_but_reaches_both_sides(overlay: dict) -> None:
+    for service in ("controlplane-edge", "payment-service", "hypermesh-service", "hypermesh-gateway", "aiuditor-service"):
+        assert _service_env(overlay, service)["AIUDITOR_INTERNAL_TOKEN"] == "${AIUDITOR_INTERNAL_TOKEN:-}"
+
+
+def test_public_test_endpoints_are_owned_by_vm_overlay(overlay: dict) -> None:
+    for service in ("hypermesh-service", "hypermesh-gateway"):
+        assert _service_env(overlay, service)["HYPERMESH_WG_ENDPOINT"] == "${HYPERMESH_WG_ENDPOINT:-wg.test.hyperme.sh:51820}"
+    gateway = _service_env(overlay, "hypermesh-gateway")
+    assert gateway["HYPERMESH_CONTROL_URL"] == "${HYPERMESH_CONTROL_URL:-https://api.test.hyperme.sh}"
+    assert gateway["HYPERMESH_CONTROL_PLANE_URL"] == "http://hypermesh-service:8000"
