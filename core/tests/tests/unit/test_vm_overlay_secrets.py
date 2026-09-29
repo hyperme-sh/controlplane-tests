@@ -392,3 +392,14 @@ def test_public_test_endpoints_are_owned_by_vm_overlay(overlay: dict) -> None:
     gateway = _service_env(overlay, "hypermesh-gateway")
     assert gateway["HYPERMESH_CONTROL_URL"] == "${HYPERMESH_CONTROL_URL:-https://api.test.hyperme.sh}"
     assert gateway["HYPERMESH_CONTROL_PLANE_URL"] == "http://hypermesh-service:8000"
+
+
+def test_known_host_plane_defaults_do_not_need_infra_exports(overlay: dict) -> None:
+    env = _service_env(overlay, "hypermesh-known-host-enroll")
+    assert env["HYPERMESH_API_BASE"] == "${HYPERMESH_API_BASE:-https://api.test.hyperme.sh}"
+    assert env["HYPERMESH_PORTAL_ORIGIN"] == "${HYPERMESH_PORTAL_ORIGIN:-https://portal.test.hyperme.sh}"
+    assert env["HYPERMESH_OIDC_ISSUER"] == "${HYPERMESH_OIDC_ISSUER:-https://auth.test.hyperme.sh/realms/controlplane}"
+    assert env["HYPERMESH_PROD_API_BASE"] == "${HYPERMESH_PROD_API_BASE:-}"
+    assert env["HYPERMESH_PROD_PORTAL_ORIGIN"] == "${HYPERMESH_PROD_PORTAL_ORIGIN:-}"
+    assert env["HYPERMESH_HOST_TARGET_FYBER_AGX64_1"] == "${HYPERMESH_HOST_TARGET_FYBER_AGX64_1:-}"
+    assert "HYPERMESH_HOST_TARGET_FYBER_AGX_ORIN_64_001" not in env
