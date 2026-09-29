@@ -30,8 +30,8 @@ def test_idle_tunnel_migration_preserves_peers_and_tenant_scope(require_docker, 
             for status, lid in leases.items():
                 cx.execute(text("""
                     INSERT INTO hypermesh_leases
-                      (id, tenant_id, kind, status, renter_user_id, class_id, reserved_hours, created_at)
-                    VALUES (:id, :tenant, 'p1_hardware', :status, :renter, 'agx-large', 1, now())
+                      (id, tenant_id, kind, status, renter_user_id, class_id, reserved_hours, created_at, token_count, loaded_hours, purpose)
+                    VALUES (:id, :tenant, 'p1_hardware', :status, :renter, 'agx-large', 1, now(), 0, 0, 'renter')
                 """), {"id": lid, "tenant": tenant, "status": status, "renter": uuid.uuid4()})
             cases = [(status, tenant, lid, "allocated") for status, lid in leases.items()]
             cases += [("other-tenant", other, leases["ended"], "allocated"),
