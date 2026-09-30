@@ -25,8 +25,8 @@ from panopticon_tests.fixtures.postgres import (
 pytestmark = pytest.mark.integration
 
 _MARKETPLACE = "8f8e8d8c-7b6a-4a59-8c3d-2e1f0a9b8c7d"
-_LIVE = "f6124d28-772c-4f1f-8e03-1a7a17724381"
-_PLACEHOLDER = "a6400000-0640-4000-8000-000000000001"
+_LIVE = str(uuid.uuid4())
+_PLACEHOLDER = str(uuid.uuid4())
 _OVERSIZE = 11_264_441_216
 _BEFORE_BIGINT = "0037_api_key_last_used"
 _BIGINT = "0038_aiuditor_size_bytes_bigint"
@@ -281,23 +281,23 @@ def test_lab_identity_keeps_listing_cert_and_price(postgres: str) -> None:
     _upgrade(postgres, "head")
     live = _device(postgres, _LIVE)
     assert live == {
-        "lab": True,
+        "lab": False,
         "enrolled": True,
         "sell_state": "selling",
         "path_b_state": "green",
     }
     placeholder = _device(postgres, _PLACEHOLDER)
     assert placeholder == {
-        "lab": False,
-        "enrolled": False,
-        "sell_state": "paused",
+        "lab": True,
+        "enrolled": True,
+        "sell_state": "selling",
         "path_b_state": "green",
     }
     assert _prices(postgres) == before_prices
 
     _downgrade(postgres, _BIGINT)
-    assert _device(postgres, _LIVE)["lab"] is True
-    assert _device(postgres, _PLACEHOLDER)["sell_state"] == "paused"
+    assert _device(postgres, _LIVE)["lab"] is False
+    assert _device(postgres, _PLACEHOLDER)["sell_state"] == "selling"
     assert _prices(postgres) == before_prices
 
     _upgrade(postgres, "head")

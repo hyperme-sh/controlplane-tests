@@ -401,5 +401,10 @@ def test_known_host_plane_defaults_do_not_need_infra_exports(overlay: dict) -> N
     assert env["HYPERMESH_OIDC_ISSUER"] == "${HYPERMESH_OIDC_ISSUER:-https://auth.test.hyperme.sh/realms/controlplane}"
     assert env["HYPERMESH_PROD_API_BASE"] == "${HYPERMESH_PROD_API_BASE:-}"
     assert env["HYPERMESH_PROD_PORTAL_ORIGIN"] == "${HYPERMESH_PROD_PORTAL_ORIGIN:-}"
-    assert env["HYPERMESH_HOST_TARGET_FYBER_AGX64_1"] == "${HYPERMESH_HOST_TARGET_FYBER_AGX64_1:-}"
-    assert "HYPERMESH_HOST_TARGET_FYBER_AGX_ORIN_64_001" not in env
+    for setting in (
+        "HYPERMESH_HOST_TARGET",
+        "HYPERMESH_SMOKE_HOST_NAME",
+        "HYPERMESH_HOST_CLASS_ID",
+    ):
+        assert env[setting] == "${" + setting + ":-}"
+    assert not any(key.startswith("HYPERMESH_HOST_TARGET_") for key in env)
