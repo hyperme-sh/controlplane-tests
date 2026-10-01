@@ -391,3 +391,78 @@ async def test_postgres_mode_does_not_queue_a_second_delivery(plane):
             pytest.fail("Postgres enrollment event must not be published twice")
 
     assert await forward_registration_events(maker, RefusePublisher(), person["tenant_id"]) == 0
+
+
+async def test_onboarding_certificate_is_atomic_immutable_and_owner_bound(plane, monkeypatch):
+    from controlplane_db.models import HypermeshCatalogEntry, HypermeshOnboardingRun
+    from hypermesh_service import onboarding_certification as cert
+
+    reg_client, maker = plane
+    monkeypatch.setattr(cert, "get_session_maker", lambda: maker)
+    person = await account(maker)
+    body = payload()
+    secret = "hm_dev_" + secrets.token_urlsafe(24)
+    body["device_secret_hash"] = hashlib.sha256(secret.encode()).hexdigest()
+    body["credential_prefix"] = secret[7:15]
+    path = await approved(reg_client, person, body)
+    completed = await reg_client.post(path + "/complete", headers=headers(person))
+    assert completed.status_code == 200
+    device_id = uuid.UUID(completed.json()["device_id"])
+    program = {"suite_id":"pack-v1", "catalog_id":"model", "file_hash":"sha256:"+"a"*64,
+               "context_tokens":4096, "decode_tok_s":10.0, "thermal_c":None}
+    async def program_contract(*args, **kwargs):
+        assert kwargs["tenant_id"] == person["tenant_id"]
+        return program
+    monkeypatch.setattr(cert, "certification_program", program_contract)
+    async with maker() as session:
+        device = await session.get(HypermeshDevice, device_id)
+        device.path_a = {**device.path_a, "intake_result":"accepted"}
+        session.add(HypermeshCatalogEntry(
+            id=uuid.uuid4(), tenant_id=person["tenant_id"], catalog_id="model",
+            artifact_name="reviewed", class_id="agx-large", file_hash=program["file_hash"],
+            image_digest="registry.test/runtime@sha256:"+"b"*64,
+            runtime="nvidia", format="gguf", advertised_context=4096, size_bytes=1234,
+            onboarding_source_ref="bartowski/model@"+"a"*40+"/model.gguf",
+            certified=True, per_1k_token_cents=0, loaded_hour_min_cents=0,
+        ))
+        await session.commit()
+    app = FastAPI()
+    app.include_router(cert.router, prefix="/api/v1")
+    hdr = {"Authorization":"Bearer "+secret,"X-Tenant-ID":str(person["tenant_id"])}
+    query = {"protocol_version":1, "request_id":body["request_id"],
+             "device_id":str(device_id),"run_id":str(uuid.uuid4()),"nonce":secrets.token_hex(32)}
+    prefix = "/api/v1/hypermesh/agent/onboarding/certification"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://plane.test") as client:
+        plans = await asyncio.gather(*[client.post(prefix+"/plan",headers=hdr,json=query) for _ in range(3)])
+        assert all(r.status_code==200 for r in plans), [r.text for r in plans]
+        digest = plans[0].json()["manifest_sha256"]
+        assert {r.json()["manifest_sha256"] for r in plans} == {digest}
+        query["manifest_sha256"] = digest
+        evidence = {"host_image_hash":"sha256:"+"c"*64, "file_hash":program["file_hash"],
+            "image_digest":"registry.test/runtime@sha256:"+"b"*64,
+            "sample_ms":100,"tokens_per_second":10.0,"thermal_c":None,
+            "context_tokens":4096,"prompt_tokens":4080,"generated_tokens":16,
+            "context_elapsed_ms":100,"cleanup_complete":True,"tunnel_verified":True}
+        results = await asyncio.gather(*[client.post(prefix+"/result",headers=hdr,
+            json={**query,"evidence":evidence}) for _ in range(3)])
+        assert all(r.status_code==200 and r.json()["state"]=="passed" for r in results), [r.text for r in results]
+        changed = await client.post(prefix+"/result",headers=hdr,json={**query,"evidence":{**evidence,"sample_ms":101}})
+        assert changed.status_code==409
+        approval={"run_id":query["run_id"],"manifest_sha256":digest}
+        other = await account(maker, tenant_id=person["tenant_id"])
+        denied = await client.post("/api/v1/hypermesh/host-onboarding/approve-activation",
+                                   headers=headers(other),json=approval)
+        assert denied.status_code==403
+        assert (await client.post("/api/v1/hypermesh/host-onboarding/approve-activation",
+                                  headers=headers(person),json=approval)).status_code==200
+        permitted = await client.post(prefix+"/activation",headers=hdr,json=query)
+        assert permitted.status_code==200, permitted.text
+        assert permitted.json()["activation_allowed"] and not permitted.json()["selling_allowed"]
+        async with maker() as session:
+            device = await session.get(HypermeshDevice,device_id)
+            assert device.path_b_state=="green" and device.sell_state=="paused"
+            run = await session.get(HypermeshOnboardingRun,uuid.UUID(query["run_id"]))
+            assert run.evidence==evidence and run.approved_by==person["subject"]
+            device.schedule_hold=True
+            await session.commit()
+        assert (await client.post(prefix+"/activation",headers=hdr,json=query)).status_code==409
