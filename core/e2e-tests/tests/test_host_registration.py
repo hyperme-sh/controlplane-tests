@@ -299,9 +299,17 @@ def test_registration_migration_existing_schema_and_forced_rls(migrated_postgres
         transaction = cx.begin()
         try:
             with Operations.context(MigrationContext.configure(cx)):
+                # The subsequent onboarding table references registrations.
+                successor_path = path.with_name("20261001_0053_onboarding_runs.py")
+                successor_spec = importlib.util.spec_from_file_location("onboarding_migration", successor_path)
+                successor = importlib.util.module_from_spec(successor_spec)
+                successor_spec.loader.exec_module(successor)
+                successor.downgrade()
                 module.downgrade()
                 module.upgrade()
                 module.upgrade()  # current-metadata bootstrap is safe, too
+                successor.upgrade()
+                successor.upgrade()
             row = cx.execute(text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
                                   "WHERE oid = 'hypermesh_host_registrations'::regclass")).one()
             assert row == (True, True)
@@ -466,3 +474,19 @@ async def test_onboarding_certificate_is_atomic_immutable_and_owner_bound(plane,
             device.schedule_hold=True
             await session.commit()
         assert (await client.post(prefix+"/activation",headers=hdr,json=query)).status_code==409
+
+        # Exercise FORCE RLS using a non-owner role, not the superuser fixture.
+        async with maker() as session:
+            role = "onboarding_rls_" + uuid.uuid4().hex
+            await session.execute(text(f'CREATE ROLE "{role}" NOLOGIN'))
+            await session.execute(text(f'GRANT SELECT ON hypermesh_onboarding_runs TO "{role}"'))
+            await session.execute(text(f'SET LOCAL ROLE "{role}"'))
+            await session.execute(text("SELECT set_config('app.current_tenant_id', '', true)"))
+            assert await session.scalar(select(func.count()).select_from(HypermeshOnboardingRun)) == 0
+            await session.execute(text("SELECT set_config('app.current_tenant_id', :tid, true)"),
+                                  {"tid": str(person["tenant_id"])})
+            assert await session.scalar(select(func.count()).select_from(HypermeshOnboardingRun)) == 1
+            await session.execute(text("SELECT set_config('app.current_tenant_id', :tid, true)"),
+                                  {"tid": str(uuid.uuid4())})
+            assert await session.scalar(select(func.count()).select_from(HypermeshOnboardingRun)) == 0
+            await session.rollback()
