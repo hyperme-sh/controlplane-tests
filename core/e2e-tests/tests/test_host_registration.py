@@ -38,6 +38,7 @@ async def plane(async_engine, monkeypatch):
     maker = async_sessionmaker(async_engine, expire_on_commit=False, autoflush=False)
     monkeypatch.setattr(registration, "get_session_maker", lambda: maker)
     monkeypatch.setattr(settings, "api_key_exchange_jwt_secret", "registration-tests-secret-with-at-least-32-chars")
+    monkeypatch.setattr(settings, "azure_service_bus_connection_string", None)
     app = FastAPI()
     app.include_router(registration.router, prefix="/api/v1")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://plane.test") as client:
@@ -328,3 +329,65 @@ def test_registration_migration_existing_schema_and_forced_rls(migrated_postgres
         finally:
             transaction.rollback()
     engine.dispose()
+
+
+async def test_service_bus_outbox_retries_after_send_failure_and_restart(plane, monkeypatch):
+    import json
+    from api.infrastructure.messaging.tenant_event_publisher import (
+        MemoryServiceBusSender, ServiceBusTenantEventPublisher,
+    )
+    from hypermesh_service.registration_events import forward_registration_events
+
+    client, maker = plane
+    monkeypatch.setattr(settings, "azure_service_bus_connection_string", "configured")
+    person = await account(maker)
+    body = payload()
+    path = await approved(client, person, body)
+    result = await client.post(path + "/complete", headers=headers(person))
+    assert result.status_code == 200
+    async with maker() as s:
+        row = await s.get(HypermeshHostRegistration, uuid.UUID(body["request_id"]))
+        assert row.enrollment_event["correlation_id"] == body["request_id"]
+        assert row.event_forwarded_at is None
+
+    class UncertainSender(MemoryServiceBusSender):
+        async def send_json(self, **kwargs):
+            await super().send_json(**kwargs)
+            raise OSError("acknowledgment lost")
+
+    failing = UncertainSender()
+    publisher = ServiceBusTenantEventPublisher(failing, "controlplane.events.v1", "hypermesh-service")
+    with pytest.raises(OSError):
+        await forward_registration_events(maker, publisher, person["tenant_id"])
+    async with maker() as s:
+        row = await s.get(HypermeshHostRegistration, uuid.UUID(body["request_id"]))
+        assert row.state == "completed" and row.event_forwarded_at is None
+
+    sender = MemoryServiceBusSender()
+    restarted = ServiceBusTenantEventPublisher(sender, "controlplane.events.v1", "hypermesh-service")
+    counts = await asyncio.gather(*[
+        forward_registration_events(maker, restarted, person["tenant_id"]) for _ in range(3)
+    ])
+    assert sum(counts) == 1 and len(sender.sent) == 1
+    delivered = json.loads(sender.sent[0]["body"])
+    uncertain = json.loads(failing.sent[0]["body"])
+    assert delivered["event_type"] == "hypermesh.device.enrolled.v1"
+    assert delivered["correlation_id"] == uncertain["correlation_id"] == body["request_id"]
+    assert delivered["payload"]["device_id"] == result.json()["device_id"]
+    assert body["device_secret_hash"] not in sender.sent[0]["body"]
+    assert await forward_registration_events(maker, restarted, person["tenant_id"]) == 0
+
+
+async def test_postgres_mode_does_not_queue_a_second_delivery(plane):
+    from hypermesh_service.registration_events import forward_registration_events
+    client, maker = plane
+    person = await account(maker)
+    body = payload()
+    path = await approved(client, person, body)
+    assert (await client.post(path + "/complete", headers=headers(person))).status_code == 200
+
+    class RefusePublisher:
+        async def publish(self, **kwargs):
+            pytest.fail("Postgres enrollment event must not be published twice")
+
+    assert await forward_registration_events(maker, RefusePublisher(), person["tenant_id"]) == 0
