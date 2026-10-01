@@ -34,7 +34,7 @@ _REV = "0044_pricing_schema"
 _LEASE = "0045_lease_failed_at"
 _EVENTS = "0046_controlplane_events"
 _IDEMPOTENCY = "0047_event_handler_idempotency"
-_HEAD = "0051_host_org_bindings"
+_HEAD = "0052_host_registrations"
 _TENANT = "8f8e8d8c-7b6a-4a59-8c3d-2e1f0a9b8c7d"
 _HASH = "ab" * 32
 _COMMIT = "cd" * 32
@@ -162,7 +162,9 @@ def test_pricing_revision_revises_device_host_type() -> None:
     assert idem.down_revision == _EVENTS
     head = script.get_revision(_HEAD)
     assert head is not None
-    assert head.down_revision == "0050_host_lifecycle"
+    assert head.down_revision == "0051_host_org_bindings"
+    ownership = script.get_revision("0051_host_org_bindings")
+    assert ownership.down_revision == "0050_host_lifecycle"
     lifecycle = script.get_revision("0050_host_lifecycle")
     assert lifecycle is not None
     assert lifecycle.down_revision == "0049_idle_tunnel_lease"

@@ -143,6 +143,9 @@ def test_host_binding_migration_on_existing_schema(migrated_postgres: str) -> No
             transaction = cx.begin()
             try:
                 with Operations.context(MigrationContext.configure(cx)):
+                    # This historical migration owns the org uniqueness constraint;
+                    # remove the newer dependent table within this rolled-back test.
+                    cx.execute(text("DROP TABLE hypermesh_host_registrations"))
                     migration.downgrade()
                     assert cx.execute(text("SELECT to_regclass('host_organization_bindings')")).scalar() is None
                     migration.upgrade()
