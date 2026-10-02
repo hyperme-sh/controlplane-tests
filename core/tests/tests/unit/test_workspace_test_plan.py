@@ -64,3 +64,15 @@ def test_invalid_filter_input_fails_closed(bad):
 
 def test_runner_labels_remain_private_self_hosted():
     assert all(job["runs-on"] == ["self-hosted", "linux", "x64"] for job in workflow["jobs"].values())
+
+
+def test_edge_and_hypermesh_select_only_affected_suites():
+    enabled, selectors = selection("controlplane-edge/src/controlplane_edge/public_hypermesh_browse.py",
+                                   "products/hypermesh/src/hypermesh_service/updates/source.py")
+    assert enabled
+    result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
+                            check=True, capture_output=True, text=True)
+    assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
+                                         "products/hypermesh-gateway", "products/hypermesh-orchestrator",
+                                         "core/e2e-tests"]
+    assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])
