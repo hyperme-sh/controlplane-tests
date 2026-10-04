@@ -49,12 +49,12 @@ def databases():
         # No source connections may remain when copying its schema and data.
         admin = create_engine(url, isolation_level='AUTOCOMMIT')
         with admin.connect() as connection:
-            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles'):
-                template = 'source' if name in ('stamped', 'rollback') else 'template0'
+            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure'):
+                template = 'source' if name in ('stamped', 'rollback', 'reload', 'reload_failure') else 'template0'
                 connection.exec_driver_sql(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
         admin.dispose()
         yield {name: url.rsplit('/', 1)[0] + '/' + name for name in
-               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles')}
+               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure')}
 
 
 def test_fresh_baselines_match_every_0053_database_object(databases):
@@ -190,3 +190,80 @@ def test_empty_or_partial_databases_cannot_be_stamped(databases):
     with pytest.raises(ValueError, match='missing baseline tables'):
         migrations.stamp_baselines(databases['no_roles'])
     assert set(migrations.current_heads(databases['no_roles']).values()) == {None}
+
+
+def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
+    from controlplane_db.startup import _owners
+    url = databases['reload']
+    before = snapshot(url)
+    _owners(url)
+    _owners(url)
+    assert migrations.current_heads(url) == migrations.chain_heads()
+    assert snapshot(url) == before
+    root = tmp_path / 'chains'
+    shutil.copytree(CHAINS, root)
+    (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
+revision = 'payment_reload_0054'
+down_revision = 'payment_service_0053_baseline'
+branch_labels = None
+depends_on = None
+def upgrade():
+    op.execute('CREATE TABLE payment_reload_marker(id integer)')
+def downgrade():
+    pass
+""")
+    _owners(url, root)
+    _owners(url, root)
+    assert migrations.current_heads(url, root)['payment_service'] == 'payment_reload_0054'
+
+
+def test_reload_refuses_unversioned_existing_schema(databases):
+    from controlplane_db.startup import _owners
+    url = databases['unversioned']
+    execute(url, 'CREATE TABLE tenants (id uuid PRIMARY KEY)')
+    before = snapshot(url)
+    with pytest.raises(ValueError, match='unversioned existing'):
+        _owners(url)
+    assert snapshot(url) == before
+
+
+def test_reload_refuses_0052_without_changing_it(databases, monkeypatch):
+    from controlplane_db.startup import _owners
+    url = databases['reload_old']
+    monkeypatch.setenv('DATABASE_URL', url)
+    command.upgrade(Config(str(alembic_ini_path())), '0052_host_registrations')
+    before = snapshot(url)
+    with pytest.raises(ValueError, match='0053_onboarding_runs'):
+        _owners(url)
+    assert snapshot(url) == before
+    assert set(migrations.current_heads(url).values()) == {None}
+
+
+def test_reload_fresh_database_uses_owner_schema(databases):
+    from controlplane_db.startup import _owners
+    _owners(databases['reload_fresh'])
+    assert snapshot(databases['reload_fresh']) == snapshot(databases['source'])
+    assert migrations.current_heads(databases['reload_fresh']) == migrations.chain_heads()
+
+
+def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
+    from controlplane_db.startup import _owners
+    root = tmp_path / 'chains'
+    shutil.copytree(CHAINS, root)
+    (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
+revision = 'payment_failure_0054'
+down_revision = 'payment_service_0053_baseline'
+branch_labels = None
+depends_on = None
+def upgrade():
+    op.execute('CREATE TABLE reload_failure_marker(id integer)')
+    raise RuntimeError('planted reload failure')
+def downgrade():
+    pass
+""")
+    url = databases['reload_failure']
+    before = snapshot(url)
+    with pytest.raises(RuntimeError, match='planted reload failure'):
+        _owners(url, root)
+    assert snapshot(url) == before
+    assert set(migrations.current_heads(url).values()) == {None}

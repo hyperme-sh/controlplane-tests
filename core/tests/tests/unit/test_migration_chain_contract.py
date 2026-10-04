@@ -38,8 +38,9 @@ def test_installed_wheel_contains_runner_and_five_baselines():
     env.pop('UV_NO_SYNC', None)
     result = subprocess.run([
         'uv', 'run', '--isolated', '--no-editable', '--frozen', '--no-dev',
+        '--refresh-package', 'controlplane-db',
         '--package', 'controlplane-db', 'python', '-c',
-        "import json; from pathlib import Path; import controlplane_db.migrations as m; "
+        "import json; from pathlib import Path; import controlplane_db.migrations as m; import controlplane_db.startup as startup; assert callable(startup.main); "
         "assert len(list(Path(m.__file__).with_name('migration_chains').glob('*/versions/baseline.sql'))) == 5; "
         "print(json.dumps(m.chain_heads()))",
     ], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
