@@ -103,3 +103,18 @@ def test_regenerating_snapshot_cannot_hide_unversioned_change_from_git_base(tmp_
     assert checker.check(tmp_path, manifest, base="HEAD") == ["example: API changed without a version bump"]
     manifest["libraries"]["example"]["version"] = "0.2.0"
     assert checker.check(tmp_path, manifest, write=True, base="HEAD") == []
+
+
+@pytest.mark.parametrize("declaration", ['__tablename__ = "new_table"', '__tablename__: str = "new_table"'])
+def test_new_table_requires_owner_for_plain_and_annotated_declarations(tmp_path, declaration):
+    source = tmp_path / "core/lib/controlplane-db/src/controlplane_db/models.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("class NewModel:\n    " + declaration + "\n")
+    assert checker.table_names(tmp_path) == {"new_table"}
+    manifest = json.loads((ROOT / checker.MANIFEST).read_text())
+    # Preserve the real import contract while exercising a newly planted ORM table.
+    contract = tmp_path / "scripts/import_boundaries.json"
+    contract.parent.mkdir(parents=True)
+    contract.write_text((ROOT / "scripts/import_boundaries.json").read_text())
+    assert any("tables without owners" in error and "new_table" in error
+               for error in checker.validate_manifest(tmp_path, manifest))

@@ -106,3 +106,24 @@ def test_compose_credential_values_are_rejected_without_echoing_them(tmp_path, v
 def test_runtime_supplied_credentials_are_allowed(tmp_path, value):
     write(tmp_path, "compose.yaml", f"POSTGRES_PASSWORD: '{value}'")
     assert checker.findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("key", ['"POSTGRES_PASSWORD"', "'POSTGRES_PASSWORD'", "POSTGRES_PASSWORD"])
+@pytest.mark.parametrize("value", ["plaintext", "", "${POSTGRES_PASSWORD}", "${POSTGRES_PASSWORD:-secret}"])
+def test_quoted_credential_keys_and_json_values(tmp_path, key, value):
+    write(tmp_path, "config.json", '{' + key + ': "' + value + '"}')
+    messages = checker.findings(tmp_path)
+    assert any("committed-credential" in message for message in messages) == (value in {"plaintext", "${POSTGRES_PASSWORD:-secret}"})
+    assert "plaintext" not in "\n".join(messages)
+
+
+@pytest.mark.parametrize("name,data", [
+    ("artifact.pdf", b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n%%EOF"),
+    ("disguised.txt", b"%PDF-1.4\n%%EOF"),
+    ("artifact.pdf", b"ASCII metadata only"),
+    ("artifact.unknown", b"unclassified artifact"),
+    ("control.txt", b"hidden\x01content"),
+])
+def test_utf8_binary_and_unknown_artifacts_require_review(tmp_path, name, data):
+    (tmp_path / name).write_bytes(data)
+    assert checker.findings(tmp_path) == [f"{name}: unreadable-or-binary (manual-review-required)"]
