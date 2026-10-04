@@ -23,10 +23,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.config import settings
 from api.infrastructure.security.tenant_session_jwt import mint_tenant_session_jwt
 from controlplane_db.models import (
-    Group, HostOrganizationBinding, HypermeshDevice, HypermeshHardwareClass,
-    HypermeshHostRegistration, OperatorBan, Organization, Role, Tenant,
-    User, UserGroupMembership,
+    Group,
+    Organization,
+    Role,
+    Tenant,
+    User,
+    UserGroupMembership,
 )
+from hypermesh_service.models import (
+    HostOrganizationBinding,
+    HypermeshDevice,
+    HypermeshHardwareClass,
+    HypermeshHostRegistration,
+)
+from user_service.models import OperatorBan
 from hypermesh_service import host_registration as registration
 
 pytestmark = pytest.mark.integration
@@ -402,7 +412,7 @@ async def test_postgres_mode_does_not_queue_a_second_delivery(plane):
 
 
 async def test_onboarding_certificate_is_atomic_immutable_and_owner_bound(plane, monkeypatch):
-    from controlplane_db.models import HypermeshCatalogEntry, HypermeshOnboardingRun
+    from hypermesh_service.models import HypermeshCatalogEntry, HypermeshOnboardingRun
     from hypermesh_service import onboarding_certification as cert
 
     reg_client, maker = plane
