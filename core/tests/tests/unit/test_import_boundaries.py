@@ -41,7 +41,7 @@ def test_from_parent_cannot_hide_private_module(tmp_path):
     ('products/aiuditor/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('core/auth-service/src/auth_service/probe.py', 'import hypermesh_service.seed', False),
     ('core/e2e-tests/tests/test_probe.py', 'import hypermesh_service.seed', True),
-    ('products/hypermesh/src/hypermesh_service/probe.py', 'from controlplane_db.models import HypermeshDevice', True),
+    ('products/hypermesh/src/hypermesh_service/probe.py', 'from hypermesh_service.models import HypermeshDevice', True),
 ])
 def test_named_exceptions_and_public_interfaces(tmp_path, path, statement, allowed):
     write(tmp_path, path, statement)

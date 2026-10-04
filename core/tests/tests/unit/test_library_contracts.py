@@ -69,7 +69,7 @@ def test_private_base_fields_are_part_of_exported_class_contract(tmp_path):
 
 def test_different_release_train_versions_and_unassigned_public_modules_fail():
     manifest = json.loads((ROOT / checker.MANIFEST).read_text())
-    manifest["libraries"]["controlplane-db"]["version"] = "0.2.0"
+    manifest["libraries"]["controlplane-db"]["version"] = "0.3.0"
     manifest["libraries"]["controlplane-events"]["public_modules"].pop("controlplane_events.envelope")
     errors = checker.validate_manifest(ROOT, manifest)
     assert any("release-train" in error for error in errors)
@@ -112,9 +112,16 @@ def test_new_table_requires_owner_for_plain_and_annotated_declarations(tmp_path,
     source.write_text("class NewModel:\n    " + declaration + "\n")
     assert checker.table_names(tmp_path) == {"new_table"}
     manifest = json.loads((ROOT / checker.MANIFEST).read_text())
+    manifest["model_sources"] = {"platform": "core/lib/controlplane-db/src/controlplane_db/models.py"}
     # Preserve the real import contract while exercising a newly planted ORM table.
     contract = tmp_path / "scripts/import_boundaries.json"
     contract.parent.mkdir(parents=True)
     contract.write_text((ROOT / "scripts/import_boundaries.json").read_text())
     assert any("tables without owners" in error and "new_table" in error
                for error in checker.validate_manifest(tmp_path, manifest))
+
+
+def test_model_source_owner_must_match_declared_table_owner():
+    manifest = json.loads((ROOT / checker.MANIFEST).read_text())
+    manifest["tables"]["hypermesh_devices"] = "platform"
+    assert "hypermesh_devices: declared owner differs from model source owner" in checker.validate_manifest(ROOT, manifest)
