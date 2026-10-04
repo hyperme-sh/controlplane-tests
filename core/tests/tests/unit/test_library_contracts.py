@@ -69,7 +69,7 @@ def test_private_base_fields_are_part_of_exported_class_contract(tmp_path):
 
 def test_different_release_train_versions_and_unassigned_public_modules_fail():
     manifest = json.loads((ROOT / checker.MANIFEST).read_text())
-    manifest["libraries"]["controlplane-db"]["version"] = "0.4.0"
+    manifest["libraries"]["controlplane-db"]["version"] = "0.5.0"
     manifest["libraries"]["controlplane-events"]["public_modules"].pop("controlplane_events.envelope")
     errors = checker.validate_manifest(ROOT, manifest)
     assert any("release-train" in error for error in errors)
