@@ -726,7 +726,7 @@ def test_repo_alembic_head_matches_script_directory() -> None:
         capture_output=True,
         text=True,
     )
-    assert completed.stdout.strip() == expected
+    assert json.loads(completed.stdout) == plan.alembic_head.deployment_heads(versions)
 
 
 def test_alembic_versions_change_rebuilds_every_bundled_image() -> None:
@@ -830,10 +830,38 @@ def test_test_tag_is_not_pushed_before_the_head_check() -> None:
     assert ":test" not in build["with"]["tags"]
     assert "ALEMBIC_HEAD" in build["with"]["build-args"]
     names = [step.get("name") or "" for step in workflow["jobs"]["deployable"]["steps"]]
-    check = names.index("Alembic head matches the repo before promotion")
+    check = names.index("Alembic heads match per chain before promotion")
     carry = names.index("Carry unchanged images to this sha")
     promote = names.index("Promote images to test")
     advance = names.index("Advance deploy/test to this sha")
     assert check < carry < promote < advance
     assert "check-heads" in workflow["jobs"]["deployable"]["steps"][check]["run"]
     assert "imagetools create" in workflow["jobs"]["deployable"]["steps"][promote]["run"]
+
+
+def test_image_labels_compare_every_owner_head():
+    heads = plan.alembic_head.deployment_heads(REPO_ROOT / plan.VERSIONS_DIR)
+    assert set(heads) == {"legacy", "platform", "events", "hypermesh", "aiuditor", "payment_service"}
+    expected = json.dumps(heads)
+    assert plan.promotion_errors(expected, {"image": json.dumps(heads, sort_keys=True)}, ["image"]) == []
+    stale = dict(heads, hypermesh="stale_hypermesh_head")
+    errors = plan.promotion_errors(expected, {"image": json.dumps(stale)}, ["image"])
+    assert len(errors) == 1 and "hypermesh head" in errors[0]
+    missing = dict(heads)
+    missing.pop("events")
+    assert "events head" in plan.promotion_errors(expected, {"image": json.dumps(missing)}, ["image"])[0]
+    assert plan.promotion_errors(expected, {"image": heads["legacy"]}, ["image"])
+
+
+def test_product_revision_changes_only_its_image_head(tmp_path):
+    import shutil
+    db_root = REPO_ROOT / "core/lib/controlplane-db/src/controlplane_db"
+    shutil.copytree(db_root / "alembic", tmp_path / "alembic")
+    shutil.copytree(db_root / "migration_chains", tmp_path / "migration_chains")
+    versions = tmp_path / "alembic/versions"
+    before = plan.alembic_head.deployment_heads(versions)
+    (tmp_path / "migration_chains/hypermesh/versions/planted.py").write_text(
+        'revision = "hypermesh_new"\ndown_revision = "hypermesh_0053_baseline"\n')
+    after = plan.alembic_head.deployment_heads(versions)
+    assert after["hypermesh"] == "hypermesh_new"
+    assert {k:v for k,v in before.items() if k != "hypermesh"} == {k:v for k,v in after.items() if k != "hypermesh"}
