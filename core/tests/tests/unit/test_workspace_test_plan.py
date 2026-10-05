@@ -27,7 +27,7 @@ def test_hypermesh_change_selects_family_and_e2e_only():
     assert enabled
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
-    assert result.stdout.splitlines() == ["products/hypermesh", "products/hypermesh-gateway",
+    assert result.stdout.splitlines() == ["products/hypermesh", "products/hypermesh-gateway", "products/hypermesh-ticket",
                                          "products/hypermesh-orchestrator", "core/e2e-tests"]
 
 
@@ -73,6 +73,6 @@ def test_edge_and_hypermesh_select_only_affected_suites():
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
     assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
-                                         "products/hypermesh-gateway", "products/hypermesh-orchestrator",
+                                         "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator",
                                          "core/e2e-tests"]
     assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])

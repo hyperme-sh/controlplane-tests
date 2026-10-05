@@ -365,7 +365,7 @@ def test_workflow_dispatch_rebuilds_every_image() -> None:
 def test_shared_copy_rebuilds_every_dependent_image() -> None:
     """A file several images COPY rebuilds those images, not the whole fleet."""
 
-    ticket = "products/hypermesh/src/hypermesh_service/ticket.py"
+    ticket = "products/hypermesh-ticket/src/hypermesh_ticket/__init__.py"
     decided = plan.plan_publish(
         event_name="push",
         base_state="ancestor",
