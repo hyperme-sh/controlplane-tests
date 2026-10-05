@@ -172,6 +172,8 @@ def test_new_family_baseline_with_existing_manifest(tmp_path, monkeypatch):
     (tmp_path / "family.py").write_text("def issue(): pass\n")
     manifest["libraries"]["family"] = {"version": "0.1.0", "release_train": "family-v0", "import_name": "family", "source_roots": ["."], "public_modules": {"family": None}}
     assert checker.check(tmp_path, manifest, write=True, base="HEAD") == []
+    manifest["libraries"]["renamed"] = manifest["libraries"].pop("existing")
+    assert checker.check(tmp_path, manifest, write=True, base="HEAD") == ["existing: registered library removed or renamed"]
 
 
 def test_family_package_and_contract_versions_must_match():
