@@ -45,7 +45,7 @@ def test_from_parent_cannot_hide_private_module(tmp_path):
     ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'import hypermesh_ticket.private', False),
     ('products/aiuditor/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('core/auth-service/src/auth_service/probe.py', 'import hypermesh_service.seed', False),
-    ('core/e2e-tests/tests/test_probe.py', 'import hypermesh_service.seed', True),
+    ('core/e2e-tests/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('products/hypermesh/src/hypermesh_service/probe.py', 'from hypermesh_service.models import HypermeshDevice', True),
 ])
 def test_named_exceptions_and_public_interfaces(tmp_path, path, statement, allowed):
@@ -57,3 +57,7 @@ def test_repo_passes_and_all_python_products_are_registered():
     assert checker.violations(ROOT, CONTRACT) == []
     actual = {str(path.parent.relative_to(ROOT)) for path in (ROOT / 'products').glob('*/pyproject.toml')}
     assert actual == set(CONTRACT['products'].values())
+
+
+def test_core_has_no_product_exceptions():
+    assert CONTRACT["core_product_exceptions"] == {}
