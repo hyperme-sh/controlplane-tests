@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -252,8 +253,16 @@ def test_every_image_bakes_git_sha_and_serves_version() -> None:
         assert "ARG BUILT_AT=" in text, name
         assert "ENV BUILT_AT=${BUILT_AT}" in text, name
         app = (REPO_ROOT / APP_SOURCES[name]).read_text(encoding="utf-8")
-        assert "version_endpoint" in app, name
-        assert "include_router(version_router)" in app, name
+        tree = ast.parse(app)
+        aliases = {alias.asname or alias.name for node in ast.walk(tree)
+                   if isinstance(node, ast.ImportFrom) and node.module in {
+                       "api.interfaces.api_controllers.version_endpoint", "controlplane_api.version"}
+                   for alias in node.names if alias.name == "router"}
+        assert aliases, name
+        assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                   and node.func.attr == "include_router" and node.args
+                   and isinstance(node.args[0], ast.Name) and node.args[0].id in aliases
+                   for node in ast.walk(tree)), name
 
 
 def test_manifest_is_published_after_carry_and_before_deploy_test_moves() -> None:
