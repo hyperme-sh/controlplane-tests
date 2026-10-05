@@ -28,6 +28,7 @@ from marketplace_service.infrastructure.user_created_consumer import (
     MARKETPLACE_USER_CREATED_GROUP,
     build_user_created_consumer as build_marketplace_consumer,
 )
+from payment_service.infrastructure.payout_due_consumer import PAYMENT_PAYOUT_GROUP, build_payout_due_consumer
 from user_service.infrastructure.payment_succeeded_consumer import (
     USER_PAYMENT_GROUP,
     build_payment_succeeded_consumer,
@@ -49,6 +50,7 @@ def test_five_consumers_resolve_distinct_subscriptions(monkeypatch) -> None:
         build_payment_succeeded_consumer("postgresql://localhost/controlplane"),
         build_ai_event_consumers("postgresql://localhost/controlplane"),
         contract_payment_consumer(),
+        build_payout_due_consumer("postgresql://localhost/controlplane", None),
     ]
     names = [consumer.subscription for consumer in consumers]
     assert names == [
@@ -57,8 +59,9 @@ def test_five_consumers_resolve_distinct_subscriptions(monkeypatch) -> None:
         USER_PAYMENT_GROUP,
         AI_SERVICE_EVENTS_GROUP,
         HYPERMESH_PAYMENT_GROUP,
+        PAYMENT_PAYOUT_GROUP,
     ]
-    assert len(set(names)) == 5
+    assert len(set(names)) == 6
     assert "shared-sub" not in names
 
 
