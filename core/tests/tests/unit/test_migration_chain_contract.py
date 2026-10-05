@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT/'scripts'))
 spec = importlib.util.spec_from_file_location('check_migration_chains', ROOT/'scripts/check_migration_chains.py')
@@ -45,3 +47,74 @@ def test_installed_wheel_contains_runner_and_five_baselines():
         "print(json.dumps(m.chain_heads()))",
     ], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
     assert set(json.loads(result.stdout)) == {'platform', 'events', 'hypermesh', 'aiuditor', 'payment_service'}
+
+
+def test_new_revision_in_wrong_owner_chain_fails(tmp_path):
+    shutil.copytree(ROOT/checker.DB, tmp_path/checker.DB)
+    (tmp_path/'scripts').mkdir()
+    shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
+    path = tmp_path/checker.DB/'migration_chains/platform/versions/0054_planted.py'
+    path.write_text('''revision = "0054_planted"
+down_revision = "platform_0053_baseline"
+def upgrade():
+    op.add_column("hypermesh_leases", column)
+''')
+    assert any('hypermesh_leases: migration belongs to hypermesh' in error for error in checker.check(tmp_path))
+    path.write_text(path.read_text().replace('hypermesh_leases', 'users'))
+    assert checker.check(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "chain,table",
+    [
+        ("platform", "hypermesh_leases"),
+        ("events", "users"),
+        ("hypermesh", "users"),
+        ("aiuditor", "hypermesh_leases"),
+        ("payment_service", "users"),
+    ],
+)
+def test_baseline_wrapper_cannot_add_foreign_owner_operations(tmp_path, chain, table):
+    shutil.copytree(ROOT / checker.DB, tmp_path / checker.DB)
+    (tmp_path / "scripts").mkdir()
+    shutil.copyfile(
+        ROOT / "scripts/ownership.json", tmp_path / "scripts/ownership.json"
+    )
+    path = tmp_path / checker.DB / f"migration_chains/{chain}/versions/0053_baseline.py"
+    original = path.read_text()
+    path.write_text(original.replace("def upgrade():\n", f'def upgrade():\n    op.drop_table("{table}")\n'))
+    assert any(
+        f"{table}: migration belongs to" in error for error in checker.check(tmp_path)
+    )
+    path.write_text(original)
+    assert checker.check(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        'op.drop_constraint("fk_name", "hypermesh_leases")',
+        'op.drop_constraint("fk_name", table_name="hypermesh_leases")',
+        'op.drop_index("index_name", "hypermesh_leases")',
+        'op.drop_index("index_name", table_name="hypermesh_leases")',
+    ],
+)
+def test_drop_operations_cannot_cross_owner_chains(tmp_path, operation):
+    shutil.copytree(ROOT / checker.DB, tmp_path / checker.DB)
+    (tmp_path / "scripts").mkdir()
+    shutil.copyfile(
+        ROOT / "scripts/ownership.json", tmp_path / "scripts/ownership.json"
+    )
+    path = tmp_path / checker.DB / "migration_chains/platform/versions/0054_planted.py"
+    source = (
+        'revision = "0054_planted"\ndown_revision = "platform_0053_baseline"\ndef upgrade():\n    '
+        + operation
+        + "\n"
+    )
+    path.write_text(source)
+    assert any(
+        "hypermesh_leases: migration belongs to hypermesh" in error
+        for error in checker.check(tmp_path)
+    )
+    path.write_text(source.replace("hypermesh_leases", "users"))
+    assert checker.check(tmp_path) == []
