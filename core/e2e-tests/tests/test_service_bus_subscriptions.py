@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from api.core.config import settings
-from hypermesh_service.payment_succeeded import (
-    HYPERMESH_PAYMENT_GROUP,
-    resolve_payment_consumer,
-)
+from api.infrastructure.messaging.tenant_event_publisher import AzureServiceBusReceiver, ServiceBusRoutingConsumer
+from controlplane_events.contracts import event_contracts, validate_event_envelope
+from controlplane_events.payloads.payment_events import PaymentSucceededPayload
+
+HYPERMESH_PAYMENT_GROUP = event_contracts()['consumer_groups']['hypermesh.payment.succeeded']
+
+
+def contract_payment_consumer(receiver=None):
+    async def receive(envelope, payload):
+        validate_event_envelope(envelope)
+    receiver = receiver or AzureServiceBusReceiver(_CONNECTION, event_contracts()['topic'], HYPERMESH_PAYMENT_GROUP)
+    return ServiceBusRoutingConsumer(receiver, {'payment.succeeded.v1': (PaymentSucceededPayload, receive)})
 
 from acl_service.infrastructure.user_created_consumer import (
     ACL_USER_CREATED_GROUP,
@@ -40,11 +48,7 @@ def test_five_consumers_resolve_distinct_subscriptions(monkeypatch) -> None:
         build_marketplace_consumer("postgresql://localhost/controlplane"),
         build_payment_succeeded_consumer("postgresql://localhost/controlplane"),
         build_ai_event_consumers("postgresql://localhost/controlplane"),
-        resolve_payment_consumer(
-            store=object(),
-            service_bus_connection_string=_CONNECTION,
-            database_url="postgresql://localhost/controlplane",
-        ),
+        contract_payment_consumer(),
     ]
     names = [consumer.subscription for consumer in consumers]
     assert names == [
@@ -56,3 +60,19 @@ def test_five_consumers_resolve_distinct_subscriptions(monkeypatch) -> None:
     ]
     assert len(set(names)) == 5
     assert "shared-sub" not in names
+
+
+async def test_payment_subscription_accepts_the_shared_wire_contract():
+    import uuid
+    from api.infrastructure.messaging.tenant_event_publisher import MemoryServiceBusReceiver
+    from controlplane_events.envelope import ControlPlaneEventEnvelope
+    receiver = MemoryServiceBusReceiver()
+    tenant_id = uuid.uuid4()
+    envelope = ControlPlaneEventEnvelope(
+        service='payment-service', event_type='payment.succeeded.v1', tenant_id=tenant_id,
+        payload={'tenant_id':str(tenant_id), 'billing_record_id':str(uuid.uuid4())},
+    )
+    receiver.enqueue(envelope.model_dump_json())
+    assert await contract_payment_consumer(receiver).drain() == 1
+    assert receiver.completed == [envelope.model_dump_json()]
+    assert receiver.abandoned == []

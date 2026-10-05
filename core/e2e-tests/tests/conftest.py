@@ -69,3 +69,15 @@ def pytest_configure(config):
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def validate_published_wire_contracts(monkeypatch):
+    """Validate real Postgres publisher/outbox envelopes before insertion in e2e tests."""
+    from controlplane_events import store
+    from controlplane_events.contracts import validate_event_envelope
+    original = store.envelope_params
+    def checked(envelope):
+        validate_event_envelope(envelope)
+        return original(envelope)
+    monkeypatch.setattr(store, 'envelope_params', checked)
