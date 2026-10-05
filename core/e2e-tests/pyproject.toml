@@ -14,7 +14,6 @@ dependencies = [
     "payment-service",
     "marketplace-service",
     "ai-service",
-    "hypermesh-service",
     "controlplane-core",
     "controlplane-db",
     "controlplane-events",
@@ -34,7 +33,6 @@ acl-service = { workspace = true }
 payment-service = { workspace = true }
 marketplace-service = { workspace = true }
 ai-service = { workspace = true }
-hypermesh-service = { workspace = true }
 controlplane-core = { workspace = true }
 controlplane-db = { workspace = true }
 controlplane-events = { workspace = true }
@@ -60,7 +58,6 @@ pythonpath = [
     "../payment-service/src",
     "../marketplace-service/src",
     "../ai-service/src",
-    "../../products/hypermesh/src",
     "../auth-service/src",
     "../lib/controlplane-core/src",
     "../lib/controlplane-db/src",
