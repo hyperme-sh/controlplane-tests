@@ -64,6 +64,7 @@ def test_existing_event_version_changes_and_removals_fail(tmp_path, monkeypatch)
         destination = tmp_path/'products'/source.parent.name/'edge-routes.json'
         destination.parent.mkdir(parents=True)
         shutil.copyfile(source, destination)
+        (destination.parent/"AGENTS.md").write_text("Fixture product")
     (tmp_path/checker.ROUTES).parent.mkdir(parents=True)
     shutil.copyfile(ROOT/checker.ROUTES, tmp_path/checker.ROUTES)
     relative = checker.SCHEMAS/'payment.succeeded.v1.json'
@@ -98,3 +99,41 @@ def test_installed_events_wheel_contains_all_wire_contracts():
         "print(len(events))",
     ], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
     assert int(result.stdout) == len(event_contracts()['events'])
+
+
+def test_decimal_wire_cost_accepts_quantized_zero_and_exponents():
+    from decimal import Decimal
+    from controlplane_events.payloads.tokens_used import TokensUsedEvent
+    for cost in (Decimal('0E-8'), Decimal('0.000000004').quantize(Decimal('0.00000001')), Decimal('1E+2')):
+        payload = TokensUsedEvent(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), model='test',
+                                  input_tokens=0, output_tokens=0, cost_usd=cost).to_envelope_payload()
+        validate_event_payload('tokens.used.v1', payload)
+    with pytest.raises(ValidationError):
+        validate_event_payload('tokens.used.v1', {**payload, 'cost_usd':'-1E-8'})
+
+
+def test_payment_v2_is_reserved_and_excludes_fine_location():
+    payload = {'tenant_id':str(uuid.uuid4()), 'billing_record_id':str(uuid.uuid4()),
+               'billing_country':'US', 'billing_subdivision':'US-TN'}
+    validate_event_payload('payment.succeeded.v2', payload)
+    assert event_contracts()['events']['payment.succeeded.v2']['status'] == 'reserved'
+    validate_event_payload('payment.succeeded.v2', {**payload, 'billing_country':'CA', 'billing_subdivision':None})
+    with pytest.raises(ValidationError):
+        validate_event_payload('payment.succeeded.v2', {**payload, 'billing_subdivision':None})
+    with pytest.raises(ValidationError):
+        validate_event_payload('payment.succeeded.v2', {**payload, 'postal_code':'12345'})
+
+
+def test_projection_gate_detects_owner_drift(tmp_path):
+    shutil.copytree(ROOT/checker.SCHEMAS, tmp_path/checker.SCHEMAS)
+    (tmp_path/'scripts').mkdir()
+    (tmp_path/'scripts/generate_event_contracts.py').write_text(
+        "def expected_schemas():\n    return {'payment.succeeded.v1': {'type': 'changed'}}\n")
+    assert checker.check_projections(tmp_path) == ['payment.succeeded.v1: owner projection differs from wire schema']
+
+
+def test_owner_projection_check_is_in_unconditional_ci_gate():
+    workflow = (ROOT/'.github/workflows/test.yml').read_text()
+    job = workflow.split('  library-contracts:', 1)[1].split('  import-boundaries:', 1)[0]
+    assert 'if:' not in job
+    assert 'scripts/check_event_contracts.py --check-projections' in job
