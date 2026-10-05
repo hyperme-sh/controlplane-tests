@@ -45,3 +45,18 @@ def test_installed_wheel_contains_runner_and_five_baselines():
         "print(json.dumps(m.chain_heads()))",
     ], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
     assert set(json.loads(result.stdout)) == {'platform', 'events', 'hypermesh', 'aiuditor', 'payment_service'}
+
+
+def test_new_revision_in_wrong_owner_chain_fails(tmp_path):
+    shutil.copytree(ROOT/checker.DB, tmp_path/checker.DB)
+    (tmp_path/'scripts').mkdir()
+    shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
+    path = tmp_path/checker.DB/'migration_chains/platform/versions/0054_planted.py'
+    path.write_text('''revision = "0054_planted"
+down_revision = "platform_0053_baseline"
+def upgrade():
+    op.add_column("hypermesh_leases", column)
+''')
+    assert any('hypermesh_leases: migration belongs to hypermesh' in error for error in checker.check(tmp_path))
+    path.write_text(path.read_text().replace('hypermesh_leases', 'users'))
+    assert checker.check(tmp_path) == []
