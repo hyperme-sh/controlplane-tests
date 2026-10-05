@@ -8,6 +8,8 @@ version = "0.0.0"
 requires-python = ">=3.13"
 description = "Integration tests and shared fixtures for the Panopticon workspace"
 dependencies = [
+    "controlplane-tenancy",
+    "controlplane-identity",
     "panopticon-models[grpc]",
     "controlplane-events",
     "controlplane-db",
@@ -21,6 +23,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+controlplane-tenancy = { workspace = true }
+controlplane-identity = { workspace = true }
 panopticon-models = { workspace = true }
 controlplane-events = { workspace = true }
 controlplane-db = { workspace = true }

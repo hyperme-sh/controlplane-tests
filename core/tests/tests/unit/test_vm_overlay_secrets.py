@@ -415,4 +415,4 @@ def test_test_reload_selects_owner_runner_for_every_schema_applicator(overlay):
         assert overlay['services'][service]['environment']['CONTROLPLANE_MIGRATION_MODE'] == 'owners'
     base = yaml.load((REPO_ROOT / 'docker-compose.yaml').read_text(), Loader=_ComposeLoader)
     assert base['services']['controlplane-migrate']['command'][-3:] == [
-        'python', '-m', 'controlplane_db.startup']
+        'python', '-m', 'controlplane_tenancy.startup']

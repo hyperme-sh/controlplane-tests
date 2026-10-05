@@ -49,12 +49,12 @@ def databases():
         # No source connections may remain when copying its schema and data.
         admin = create_engine(url, isolation_level='AUTOCOMMIT')
         with admin.connect() as connection:
-            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure'):
-                template = 'source' if name in ('stamped', 'rollback', 'reload', 'reload_failure') else 'template0'
+            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh'):
+                template = 'source' if name in ('stamped', 'rollback', 'reload', 'reload_failure', 'marketplace_owners', 'marketplace_legacy') else 'template0'
                 connection.exec_driver_sql(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
         admin.dispose()
         yield {name: url.rsplit('/', 1)[0] + '/' + name for name in
-               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure')}
+               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh')}
 
 
 def test_fresh_baselines_match_every_0053_database_object(databases):
@@ -267,3 +267,31 @@ def downgrade():
         _owners(url, root)
     assert snapshot(url) == before
     assert set(migrations.current_heads(url).values()) == {None}
+
+
+@pytest.mark.parametrize("mode, database", [("owners", "marketplace_owners"), ("legacy", "marketplace_legacy"), ("owners", "marketplace_fresh")])
+def test_startup_provisions_configured_marketplace_after_migrations(databases, monkeypatch, mode, database):
+    from controlplane_tenancy import marketplace, startup
+    url = databases[database]
+    tenant = uuid.uuid4()
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("CONTROLPLANE_MIGRATION_MODE", mode)
+    monkeypatch.setattr(marketplace, "MARKETPLACE_TENANT_ID", tenant)
+    assert startup.main() == 0
+    assert startup.main() == 0
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            row = connection.execute(text("SELECT name, is_active FROM tenants WHERE id = :id"), {"id": tenant}).one()
+            assert row.is_active is True
+            assert row.name == f"Marketplace {tenant}"
+            connection.execute(text("UPDATE tenants SET name = 'Existing marketplace' WHERE id = :id"), {"id": tenant})
+            marketplace.ensure_marketplace_tenant(connection)
+            assert connection.execute(text("SELECT name FROM tenants WHERE id = :id"), {"id": tenant}).scalar_one() == "Existing marketplace"
+            connection.execute(text("UPDATE tenants SET is_active = false WHERE id = :id"), {"id": tenant})
+        with pytest.raises(RuntimeError, match="inactive"), engine.begin() as connection:
+            marketplace.ensure_marketplace_tenant(connection)
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT is_active FROM tenants WHERE id = :id"), {"id": tenant}).scalar_one() is False
+    finally:
+        engine.dispose()
