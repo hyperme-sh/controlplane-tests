@@ -35,9 +35,14 @@ def test_from_parent_cannot_hide_private_module(tmp_path):
 
 
 @pytest.mark.parametrize(('path', 'statement', 'allowed'), [
-    ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'from hypermesh_service.ticket import verify_ticket', True),
+    ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'from hypermesh_service.ticket import verify_ticket', False),
     ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'import hypermesh_service.seed', False),
-    ('products/hypermesh-gateway/tests/test_probe.py', 'import hypermesh_service.seed', True),
+    ('products/hypermesh-gateway/tests/test_probe.py', 'import hypermesh_service.seed', False),
+    ('products/hypermesh-gateway/tests/test_probe.py', 'import hypermesh_service.app', False),
+    ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'from hypermesh_ticket import verify_ticket', True),
+    ('products/hypermesh/src/hypermesh_service/probe.py', 'from hypermesh_ticket import issue_ticket', True),
+    ('products/turn/src/turn_service/probe.py', 'from hypermesh_ticket import issue_ticket', False),
+    ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'import hypermesh_ticket.private', False),
     ('products/aiuditor/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('core/auth-service/src/auth_service/probe.py', 'import hypermesh_service.seed', False),
     ('core/e2e-tests/tests/test_probe.py', 'import hypermesh_service.seed', True),

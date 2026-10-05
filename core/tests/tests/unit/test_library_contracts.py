@@ -127,3 +127,56 @@ def test_model_source_owner_must_match_declared_table_owner():
     manifest = json.loads((ROOT / checker.MANIFEST).read_text())
     manifest["tables"]["hypermesh_devices"] = "platform"
     assert "hypermesh_devices: declared owner differs from model source owner" in checker.validate_manifest(ROOT, manifest)
+
+
+def test_family_train_is_independent_and_public_api_requires_registration():
+    manifest = json.loads((ROOT / checker.MANIFEST).read_text())
+    shared = {name: lib["version"] for name, lib in manifest["libraries"].items() if name != "hypermesh-ticket"}
+    manifest["libraries"]["hypermesh-ticket"].pop("version_file")
+    manifest["libraries"]["hypermesh-ticket"]["version"] = "0.2.0"
+    assert checker.validate_manifest(ROOT, manifest) == []
+    assert {name: lib["version"] for name, lib in manifest["libraries"].items() if name != "hypermesh-ticket"} == shared
+    del manifest["libraries"]["hypermesh-ticket"]
+    assert any("hypermesh_ticket" in error for error in checker.validate_manifest(ROOT, manifest))
+
+
+def test_ticket_export_change_requires_its_own_bump(tmp_path, monkeypatch):
+    source = tmp_path / "hypermesh_ticket.py"
+    source.write_text((ROOT / "products/hypermesh-ticket/src/hypermesh_ticket/__init__.py").read_text())
+    manifest = {"libraries": {"hypermesh-ticket": {"version": "0.1.0", "release_train": "hypermesh-ticket-v0", "import_name": "hypermesh_ticket", "source_roots": ["."], "public_modules": {"hypermesh_ticket": None}}}}
+    monkeypatch.setattr(checker, "validate_manifest", lambda root, manifest: [])
+    assert checker.check(tmp_path, manifest, write=True) == []
+    (tmp_path / checker.MANIFEST).write_text(json.dumps(manifest))
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+    git("init")
+    git("add", ".")
+    git("-c", "user.name=Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-m", "ticket baseline")
+    source.write_text(source.read_text().replace('    "issue_ticket",\n', ''))
+    assert checker.check(tmp_path, manifest, write=True, base="HEAD") == ["hypermesh-ticket: API changed without a version bump"]
+    manifest["libraries"]["hypermesh-ticket"]["version"] = "0.2.0"
+    assert checker.check(tmp_path, manifest, write=True, base="HEAD") == []
+
+
+def test_new_family_baseline_with_existing_manifest(tmp_path, monkeypatch):
+    (tmp_path / "existing.py").write_text("def unchanged(): pass\n")
+    manifest = {"libraries": {"existing": {"version": "0.8.0", "import_name": "existing", "source_roots": ["."], "public_modules": {"existing": None}}}}
+    monkeypatch.setattr(checker, "validate_manifest", lambda root, manifest: [])
+    assert checker.check(tmp_path, manifest, write=True) == []
+    (tmp_path / checker.MANIFEST).write_text(json.dumps(manifest))
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+    git("init")
+    git("add", ".")
+    git("-c", "user.name=Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-m", "shared baseline")
+    (tmp_path / "family.py").write_text("def issue(): pass\n")
+    manifest["libraries"]["family"] = {"version": "0.1.0", "release_train": "family-v0", "import_name": "family", "source_roots": ["."], "public_modules": {"family": None}}
+    assert checker.check(tmp_path, manifest, write=True, base="HEAD") == []
+    manifest["libraries"]["renamed"] = manifest["libraries"].pop("existing")
+    assert checker.check(tmp_path, manifest, write=True, base="HEAD") == ["existing: registered library removed or renamed"]
+
+
+def test_family_package_and_contract_versions_must_match():
+    manifest = json.loads((ROOT / checker.MANIFEST).read_text())
+    manifest["libraries"]["hypermesh-ticket"]["version"] = "0.2.0"
+    assert "hypermesh_ticket: package version differs from contract" in checker.validate_manifest(ROOT, manifest)

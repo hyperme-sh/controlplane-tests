@@ -11,7 +11,7 @@ ALL = [
     "core/tests", "controlplane-edge", "core/auth-service", "core/user-service",
     "core/acl-service", "core/payment-service", "core/marketplace-service",
     "core/ai-service", "core/api-keys-service", "products/template",
-    "products/tennessee-windage", "products/hypermesh", "products/hypermesh-gateway",
+    "products/tennessee-windage", "products/hypermesh", "products/hypermesh-gateway", "products/hypermesh-ticket",
     "products/hypermesh-orchestrator", "products/aiuditor", "products/turn",
     "products/oracles", "products/payments", "core/e2e-tests",
 ]
@@ -52,7 +52,7 @@ def test_no_arguments_preserves_full_order_and_commands(runner):
 def test_family_includes_e2e_and_deduplicates(runner):
     result, calls = runner("hypermesh-family", "products/hypermesh")
     assert result.returncode == 0
-    assert paths(calls) == ["products/hypermesh", "products/hypermesh-gateway",
+    assert paths(calls) == ["products/hypermesh", "products/hypermesh-gateway", "products/hypermesh-ticket",
                             "products/hypermesh-orchestrator", "core/e2e-tests"]
 
 
