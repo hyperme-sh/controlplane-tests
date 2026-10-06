@@ -13,12 +13,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
-from testcontainers.postgres import PostgresContainer
-
-from panopticon_tests.fixtures.postgres import (
-    alembic_ini_path,
-    normalize_sync_sqlalchemy_url,
-)
+from panopticon_tests.fixtures.postgres import alembic_ini_path
 
 pytestmark = pytest.mark.integration
 
@@ -54,9 +49,9 @@ def _stamp(url: str, revision: str) -> None:
 
 
 @pytest.fixture
-def postgres(require_docker: None):
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield normalize_sync_sqlalchemy_url(pg.get_connection_url())
+def postgres(migration_db: str) -> str:
+    """Own database per test, copied from a template at the test's first revision."""
+    return migration_db
 
 
 def _indexes(url: str) -> dict[str, str]:
@@ -98,6 +93,7 @@ def _rls(url: str, table: str) -> tuple[bool, bool]:
     return bool(row[0]), bool(row[1])
 
 
+@pytest.mark.migration_start(_PARENT)
 def test_clean_database_only_adds_partial_unique_indexes(postgres: str) -> None:
     _upgrade(postgres, _PARENT)
     before = _indexes(postgres)
@@ -132,6 +128,7 @@ def test_clean_database_only_adds_partial_unique_indexes(postgres: str) -> None:
     assert _role_ids(postgres) == set()
 
 
+@pytest.mark.migration_start(_PARENT)
 def test_cross_scope_user_roles_are_unchanged(postgres: str) -> None:
     """The pan-test pair is two scopes. 0042 must not merge or delete either."""
 
@@ -199,6 +196,7 @@ def test_cross_scope_user_roles_are_unchanged(postgres: str) -> None:
     assert _TENANT_INDEX in _indexes(postgres)
 
 
+@pytest.mark.migration_start(_PARENT)
 def test_same_scope_duplicates_repoint_fks_and_rerun_is_idempotent(postgres: str) -> None:
     _upgrade(postgres, _PARENT)
     other_tenant = uuid.uuid4()

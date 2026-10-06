@@ -11,6 +11,7 @@ from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
 from panopticon_tests.fixtures.postgres import (
+    MigrationTemplates,
     async_db_url,
     normalize_sync_sqlalchemy_url,
     run_alembic_upgrade,
@@ -105,6 +106,64 @@ async def rls_session(async_engine) -> AsyncSession:
 
 
 @pytest.fixture(scope="session")
+def migration_templates(require_docker: None):
+    """One role-free PostgreSQL server per pytest process for migration tests.
+
+    Kept separate from ``postgres_container`` so nothing else can add the
+    optional ``controlplane``/``controlplane_app`` roles that change what some
+    migrations grant. Under xdist each worker starts its own server, and the
+    database names carry the worker id as well.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    with PostgresContainer("postgres:16-alpine") as pg:
+        templates = MigrationTemplates(pg.get_connection_url(), prefix=f"mt_{worker}")
+        engine = create_engine(normalize_sync_sqlalchemy_url(pg.get_connection_url()))
+        with engine.connect() as cx:
+            app_roles = cx.execute(
+                text("SELECT rolname FROM pg_roles WHERE rolname IN ('controlplane', 'controlplane_app')")
+            ).scalars().all()
+        engine.dispose()
+        assert not app_roles, f"migration server must start without app roles, found {app_roles}"
+        yield templates
+        templates.dispose()
+
+
+@pytest.fixture
+def migration_database(migration_templates: MigrationTemplates):
+    """Factory for per-test databases on the shared migration server.
+
+    ``migration_database()`` is an empty database (``template0``),
+    ``migration_database("0043_device_host_type")`` is a copy of a template
+    upgraded from empty to that revision, and ``template=`` copies a named
+    template such as one from ``migration_templates.derived_template``.
+    Every database is dropped after the test.
+    """
+    created: list[str] = []
+
+    def make(revision: str | None = None, *, template: str | None = None) -> str:
+        if template is None:
+            template = migration_templates.template_at(revision) if revision else "template0"
+        name, url = migration_templates.database(template)
+        created.append(name)
+        return url
+
+    yield make
+    for name in created:
+        migration_templates.drop(name)
+
+
+@pytest.fixture
+def migration_db(request: pytest.FixtureRequest, migration_database) -> str:
+    """Per-test database already at ``@pytest.mark.migration_start(revision)``, or empty without it.
+
+    Tests still run their own first ``upgrade(revision)``; on the copy it is a
+    no-op, so the test observes the same database an upgrade from empty gives.
+    """
+    marker = request.node.get_closest_marker("migration_start")
+    return migration_database(marker.args[0] if marker else None)
+
+
+@pytest.fixture(scope="session")
 def redis_container(require_docker: None):
     with RedisContainer("redis:7-alpine") as r:
         yield r
@@ -119,6 +178,10 @@ def redis_url(redis_container: RedisContainer) -> str:
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: needs Docker (testcontainers)")
+    config.addinivalue_line(
+        "markers",
+        "migration_start(revision): migration_db starts as a copy of a template at this Alembic revision",
+    )
 
 
 @pytest.fixture

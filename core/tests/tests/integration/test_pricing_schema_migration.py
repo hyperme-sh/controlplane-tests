@@ -20,12 +20,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from testcontainers.postgres import PostgresContainer
-
-from panopticon_tests.fixtures.postgres import (
-    alembic_ini_path,
-    normalize_sync_sqlalchemy_url,
-)
+from panopticon_tests.fixtures.postgres import alembic_ini_path
 
 pytestmark = pytest.mark.integration
 
@@ -64,9 +59,9 @@ def _downgrade(url: str, revision: str) -> None:
 
 
 @pytest.fixture
-def postgres(require_docker: None):
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield normalize_sync_sqlalchemy_url(pg.get_connection_url())
+def postgres(migration_db: str) -> str:
+    """Own database per test, copied from a template at the test's first revision."""
+    return migration_db
 
 
 def _tables(url: str) -> set[str]:
@@ -173,6 +168,7 @@ def test_pricing_revision_revises_device_host_type() -> None:
     assert disk.down_revision == _IDEMPOTENCY
 
 
+@pytest.mark.migration_start(_PARENT)
 def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     _upgrade(postgres, _PARENT)
     assert _version(postgres) == _PARENT
@@ -274,6 +270,7 @@ def test_pricing_schema_upgrade_and_downgrade(postgres: str) -> None:
     assert _nullable(postgres, "hypermesh_jobs", "dispatch_skip_reason") == "YES"
 
 
+@pytest.mark.migration_start(_EVENTS)
 def test_duplicate_acl_rules_collapse_before_unique_index(postgres: str) -> None:
     """0047 must not fail when identical acl_casbin_rules rows already exist."""
 
@@ -333,6 +330,7 @@ def test_duplicate_acl_rules_collapse_before_unique_index(postgres: str) -> None
     assert "NULLS NOT DISTINCT" in indexdef
 
 
+@pytest.mark.migration_start(_EVENTS)
 def test_duplicate_acl_rules_collapse_as_nobypassrls_owner(postgres: str) -> None:
     """0047 must dedupe when the table owner is subject to FORCE RLS."""
 

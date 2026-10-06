@@ -19,16 +19,39 @@ FILTERS = yaml.safe_load(filter_step["with"]["filters"])
 def selection(*paths):
     names = [name for name, patterns in FILTERS.items()
              if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)]
-    return module.plan(names)
+    shared_files = [path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in FILTERS["shared"])]
+    return module.plan(names, shared_files)
 
 
-def test_hypermesh_change_selects_family_and_e2e_only():
+def test_planner_receives_shared_file_list():
+    assert filter_step["with"]["list-files"] == "json"
+    plan_step = next(step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "plan")
+    assert plan_step["env"]["SHARED_FILES"] == "${{ steps.filter.outputs.shared_files }}"
+
+
+def test_markdown_only_shared_changes_skip_python():
+    assert selection("core/lib/controlplane-db/README.md", "core/auth-service/AGENTS.md") == (False, [])
+    assert selection("core/lib/controlplane-db/README.md", "products/turn/src/x.py") == (True, ["products/turn"])
+    assert selection("core/lib/controlplane-db/README.md", "core/lib/controlplane-db/src/x.py") == (True, [])
+
+
+@pytest.mark.parametrize("files", [None, [], "core/x.md", {"a": 1}])
+def test_unknown_shared_file_lists_keep_full_run(files):
+    assert module.plan(["shared"], files) == (True, [])
+
+
+def test_non_string_shared_file_list_fails_closed():
+    with pytest.raises(ValueError):
+        module.plan(["shared"], [None])
+
+
+def test_hypermesh_change_selects_family_only():
     enabled, selectors = selection("products/hypermesh/src/hypermesh_service/seed.py")
     assert enabled
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
     assert result.stdout.splitlines() == ["products/hypermesh", "products/hypermesh-gateway", "products/hypermesh-ticket",
-                                         "products/hypermesh-orchestrator", "core/e2e-tests"]
+                                         "products/hypermesh-orchestrator"]
 
 
 @pytest.mark.parametrize("path", ["core/lib/new-library/src/x.py", "core/events/x.py", "core/models/x.py",
@@ -73,6 +96,5 @@ def test_edge_and_hypermesh_select_only_affected_suites():
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
     assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
-                                         "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator",
-                                         "core/e2e-tests"]
+                                         "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator"]
     assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])
