@@ -202,7 +202,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
 revision = 'payment_reload_0054'
-down_revision = 'payment_service_0054_payout_addr'
+down_revision = 'payment_service_0055_subject'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -252,7 +252,7 @@ def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
 revision = 'payment_failure_0054'
-down_revision = 'payment_service_0054_payout_addr'
+down_revision = 'payment_service_0055_subject'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -317,3 +317,68 @@ def assert_cache_migration_delta(before, after):
         ['size_bytes', 'bigint', False, None, '', '', None],
     ])
     assert after == expected
+
+
+def test_payout_subject_forward_migration_preserves_receipt_and_refuses_lossy_downgrade():
+    from sqlalchemy.exc import IntegrityError
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
+        migrations.upgrade(url, baseline_only=True)
+        engine = create_engine(url)
+        tenant, org = uuid.uuid4(), uuid.uuid4()
+        try:
+            with engine.begin() as connection:
+                command.upgrade(
+                    migrations._config(CHAINS, "payment_service", connection),
+                    "payment_service_0054_payout_addr",
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO tenants (id, name, is_active) VALUES (:id, 'subject-migration', true)"
+                    ),
+                    {"id": tenant},
+                )
+                connection.execute(
+                    text("""INSERT INTO host_payout_addresses
+                    (tenant_id, host_org_id, chain_id, address, verified_by_sub,
+                     proof_audience, proof_message_hash, proof_signature_hash, verified_at)
+                    VALUES (:tenant, :org, 84532, :address, :subject, 'test', :hash, :hash, now())"""),
+                    {
+                        "tenant": tenant,
+                        "org": org,
+                        "address": "0x" + "a" * 40,
+                        "subject": "h" * 256,
+                        "hash": "b" * 64,
+                    },
+                )
+            migrations.upgrade(url, chains=["payment_service"])
+            with engine.begin() as connection:
+                assert (
+                    connection.execute(
+                        text("SELECT verified_by_sub FROM host_payout_addresses")
+                    ).scalar_one()
+                    == "h" * 256
+                )
+                connection.execute(
+                    text("UPDATE host_payout_addresses SET verified_by_sub=:subject"),
+                    {"subject": "h" * 512},
+                )
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                command.downgrade(
+                    migrations._config(CHAINS, "payment_service", connection),
+                    "payment_service_0054_payout_addr",
+                )
+            assert (
+                migrations.current_heads(url)["payment_service"]
+                == "payment_service_0055_subject"
+            )
+            with engine.connect() as connection:
+                assert (
+                    connection.execute(
+                        text("SELECT verified_by_sub FROM host_payout_addresses")
+                    ).scalar_one()
+                    == "h" * 512
+                )
+        finally:
+            engine.dispose()
