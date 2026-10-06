@@ -117,14 +117,14 @@ def test_product_migration_changes_only_its_owner_head(databases, tmp_path):
     before = migrations.current_heads(databases['isolated'], root)
     (root / 'hypermesh/versions/0054_test.py').write_text('''from alembic import op
 revision = "hypermesh_planted_0054"
-down_revision = "hypermesh_0053_baseline"
+down_revision = "CURRENT_HEAD"
 branch_labels = None
 depends_on = None
 def upgrade():
     op.execute("ALTER TABLE hypermesh_devices ADD COLUMN planted_test integer")
 def downgrade():
     op.execute("ALTER TABLE hypermesh_devices DROP COLUMN planted_test")
-''')
+'''.replace('CURRENT_HEAD', before['hypermesh']))
     migrations.upgrade(databases['isolated'], chains=['hypermesh'], registry_path=root)
     after = migrations.current_heads(databases['isolated'], root)
     assert after['hypermesh'] == 'hypermesh_planted_0054'
@@ -197,7 +197,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     assert migrations.current_heads(url) == migrations.chain_heads()
     after = snapshot(url)
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
-    assert after == before
+    assert_cache_migration_delta(before, after)
     root = tmp_path / 'chains'
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
@@ -242,7 +242,7 @@ def test_reload_fresh_database_uses_owner_schema(databases):
     _owners(databases['reload_fresh'])
     after = snapshot(databases['reload_fresh'])
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
-    assert after == snapshot(databases['source'])
+    assert_cache_migration_delta(snapshot(databases['source']), after)
     assert migrations.current_heads(databases['reload_fresh']) == migrations.chain_heads()
 
 
@@ -295,3 +295,25 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
             assert connection.execute(text("SELECT is_active FROM tenants WHERE id = :id"), {"id": tenant}).scalar_one() is False
     finally:
         engine.dispose()
+
+
+def assert_cache_migration_delta(before, after):
+    import copy
+    expected = copy.deepcopy(before)
+    health = expected['tables']['hypermesh_device_health']
+    health['columns'].extend([
+        ['model_cache_hashes', 'jsonb', False, None, '', '', None],
+        ['model_cache_available_bytes', 'bigint', False, None, '', '', None],
+    ])
+    health['constraints'].append(['ck_hypermesh_health_cache_available', 'c',
+        'CHECK (model_cache_available_bytes IS NULL OR model_cache_available_bytes >= 0)', True])
+    health['constraints'].sort(key=lambda row: row[0])
+    jobs = expected['tables']['hypermesh_jobs']
+    for column in jobs['columns']:
+        if column[0] == 'source_ref':
+            column[1] = 'character varying(1024)'
+    jobs['columns'].extend([
+        ['file_hash', 'character varying(256)', False, None, '', '', '"default"'],
+        ['size_bytes', 'bigint', False, None, '', '', None],
+    ])
+    assert after == expected
