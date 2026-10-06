@@ -62,6 +62,7 @@ def test_identity_wheel_runs_without_legacy_api_or_products():
 import sys, uuid
 from types import SimpleNamespace
 from controlplane_identity.configuration import configure_identity
+from controlplane_identity.wallet import BaseWalletVerifier, CounterfactualValidator, WalletProofError
 from controlplane_identity.internal_token import internal_token_matches
 from controlplane_identity.person_bind import can_checkout_from_claims
 from controlplane_identity.security.tenant_session_jwt import mint_host_setup_session, try_decode_host_setup_session, try_decode_tenant_session_jwt
