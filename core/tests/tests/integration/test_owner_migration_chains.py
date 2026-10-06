@@ -105,7 +105,8 @@ def test_other_mixed_revisions_cannot_be_stamped_or_implicitly_upgraded(database
     assert set(migrations.current_heads(url).values()) == {None}
     run_alembic_upgrade(url)
     migrations.stamp_baselines(url)
-    assert migrations.current_heads(url) == migrations.chain_heads()
+    registry = json.loads((CHAINS / 'manifest.json').read_text())
+    assert migrations.current_heads(url) == {chain: entry['baseline'] for chain, entry in registry['chains'].items()}
     assert snapshot(url) == snapshot(databases['source'])
 
 
@@ -199,12 +200,14 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     _owners(url)
     _owners(url)
     assert migrations.current_heads(url) == migrations.chain_heads()
-    assert snapshot(url) == before
+    after = snapshot(url)
+    assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
+    assert after == before
     root = tmp_path / 'chains'
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
 revision = 'payment_reload_0054'
-down_revision = 'payment_service_0053_baseline'
+down_revision = 'payment_service_0054_payout_addr'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -242,7 +245,9 @@ def test_reload_refuses_0052_without_changing_it(databases, monkeypatch):
 def test_reload_fresh_database_uses_owner_schema(databases):
     from controlplane_db.startup import _owners
     _owners(databases['reload_fresh'])
-    assert snapshot(databases['reload_fresh']) == snapshot(databases['source'])
+    after = snapshot(databases['reload_fresh'])
+    assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
+    assert after == snapshot(databases['source'])
     assert migrations.current_heads(databases['reload_fresh']) == migrations.chain_heads()
 
 
@@ -252,7 +257,7 @@ def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
 revision = 'payment_failure_0054'
-down_revision = 'payment_service_0053_baseline'
+down_revision = 'payment_service_0054_payout_addr'
 branch_labels = None
 depends_on = None
 def upgrade():

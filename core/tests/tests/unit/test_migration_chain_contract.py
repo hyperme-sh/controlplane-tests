@@ -118,3 +118,14 @@ def test_drop_operations_cannot_cross_owner_chains(tmp_path, operation):
     )
     path.write_text(source.replace("hypermesh_leases", "users"))
     assert checker.check(tmp_path) == []
+
+
+def test_baseline_inventory_cannot_omit_frozen_tables(tmp_path):
+    shutil.copytree(ROOT / checker.DB, tmp_path / checker.DB)
+    (tmp_path / "scripts").mkdir()
+    shutil.copyfile(ROOT / "scripts/ownership.json", tmp_path / "scripts/ownership.json")
+    path = tmp_path / checker.DB / "migration_chains/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["chains"]["platform"]["baseline_tables"] = []
+    path.write_text(json.dumps(manifest))
+    assert "platform: baseline inventory differs from frozen SQL" in checker.check(tmp_path)
