@@ -22,13 +22,19 @@ def selection(*paths):
     return module.plan(names)
 
 
-def test_hypermesh_change_selects_family_and_e2e_only():
+def test_shared_markdown_changes_keep_full_run():
+    # AGENTS.md: shared changes run everything, including documentation-only edits.
+    assert selection("core/lib/controlplane-db/README.md") == (True, [])
+    assert selection("core/lib/controlplane-db/README.md", "products/turn/src/x.py") == (True, [])
+
+
+def test_hypermesh_change_selects_family_only():
     enabled, selectors = selection("products/hypermesh/src/hypermesh_service/seed.py")
     assert enabled
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
     assert result.stdout.splitlines() == ["products/hypermesh", "products/hypermesh-gateway", "products/hypermesh-ticket",
-                                         "products/hypermesh-orchestrator", "core/e2e-tests"]
+                                         "products/hypermesh-orchestrator"]
 
 
 @pytest.mark.parametrize("path", ["core/lib/new-library/src/x.py", "core/events/x.py", "core/models/x.py",
@@ -73,6 +79,5 @@ def test_edge_and_hypermesh_select_only_affected_suites():
     result = subprocess.run(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list", *selectors],
                             check=True, capture_output=True, text=True)
     assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
-                                         "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator",
-                                         "core/e2e-tests"]
+                                         "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator"]
     assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])

@@ -19,12 +19,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
-from testcontainers.postgres import PostgresContainer
-
-from panopticon_tests.fixtures.postgres import (
-    alembic_ini_path,
-    normalize_sync_sqlalchemy_url,
-)
+from panopticon_tests.fixtures.postgres import alembic_ini_path
 
 pytestmark = pytest.mark.integration
 
@@ -117,26 +112,29 @@ def _shape(url: str) -> dict[str, object]:
     }
 
 
-@pytest.fixture
-def legacy_database(require_docker: None):
-    """A database in the router-era shape, built by rolling 0023 back."""
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
-        _upgrade(url)
-        # The downgrade is how the old shape is reconstructed, so a downgrade
-        # that silently does nothing would leave this test asserting on an
-        # already-new database. Verified below before it is used.
-        _downgrade(url, "0022_host_cert_override")
-        yield url
+def _build_legacy(url: str) -> None:
+    _upgrade(url)
+    # The downgrade is how the old shape is reconstructed, so a downgrade
+    # that silently does nothing would leave this test asserting on an
+    # already-new database. Verified below before it is used.
+    _downgrade(url, "0022_host_cert_override")
 
 
 @pytest.fixture
-def fresh_database(require_docker: None):
-    with PostgresContainer("postgres:16-alpine") as pg:
-        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
-        _upgrade(url)
-        yield url
+def legacy_database(migration_templates, migration_database) -> str:
+    """A database in the router-era shape, built by rolling 0023 back.
+
+    The upgrade-then-downgrade runs once per session into a template; each
+    test gets its own copy of it.
+    """
+
+    template = migration_templates.derived_template("gateway_legacy_0022", "head", _build_legacy)
+    return migration_database(template=template)
+
+
+@pytest.fixture
+def fresh_database(migration_database) -> str:
+    return migration_database("head")
 
 
 def test_legacy_fixture_really_is_router_era(legacy_database: str) -> None:

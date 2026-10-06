@@ -156,17 +156,12 @@ def test_schema_diff_detects_rls_index_constraint_and_grant_drift(databases):
         assert before['tables']['hypermesh_devices'][key] != after['tables']['hypermesh_devices'][key]
 
 
-def test_baselines_match_when_optional_app_roles_do_not_exist():
-    with PostgresContainer('postgres:16-alpine', username='migration', password='local-test-only', dbname='source') as pg:
-        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
-        run_alembic_upgrade(url)
-        admin = create_engine(url, isolation_level='AUTOCOMMIT')
-        with admin.connect() as connection:
-            connection.exec_driver_sql('CREATE DATABASE fresh TEMPLATE template0')
-        admin.dispose()
-        fresh = url.rsplit('/', 1)[0] + '/fresh'
-        migrations.upgrade(fresh, baseline_only=True)
-        assert snapshot(url) == snapshot(fresh)
+def test_baselines_match_when_optional_app_roles_do_not_exist(migration_database):
+    # The shared migration server is checked to have no controlplane/controlplane_app roles.
+    url = migration_database('head')
+    fresh = migration_database()
+    migrations.upgrade(fresh, baseline_only=True)
+    assert snapshot(url) == snapshot(fresh)
 
 
 def test_cross_chain_foreign_keys_only_target_platform(databases):

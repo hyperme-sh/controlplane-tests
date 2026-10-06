@@ -15,12 +15,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
-from testcontainers.postgres import PostgresContainer
-
-from panopticon_tests.fixtures.postgres import (
-    alembic_ini_path,
-    normalize_sync_sqlalchemy_url,
-)
+from panopticon_tests.fixtures.postgres import alembic_ini_path
 
 pytestmark = pytest.mark.integration
 
@@ -170,9 +165,9 @@ def _prices(url: str) -> dict[str, object]:
 
 
 @pytest.fixture
-def postgres(require_docker: None):
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield normalize_sync_sqlalchemy_url(pg.get_connection_url())
+def postgres(migration_db: str) -> str:
+    """Own database per test, copied from a template at the test's first revision."""
+    return migration_db
 
 
 def _narrow_size_bytes(url: str) -> None:
@@ -199,6 +194,7 @@ def _narrow_size_bytes(url: str) -> None:
         )
 
 
+@pytest.mark.migration_start(_BEFORE_BIGINT)
 def test_size_bytes_bigint_upgrade_and_downgrade(postgres: str) -> None:
     _upgrade(postgres, _BEFORE_BIGINT)
     _narrow_size_bytes(postgres)
@@ -226,6 +222,7 @@ def test_size_bytes_bigint_upgrade_and_downgrade(postgres: str) -> None:
         _insert_candidate(postgres, _OVERSIZE)
 
 
+@pytest.mark.migration_start(_BIGINT)
 def test_lab_identity_keeps_listing_cert_and_price(postgres: str) -> None:
     _upgrade(postgres, _BIGINT)
     eng = create_engine(postgres)
@@ -306,6 +303,7 @@ def test_lab_identity_keeps_listing_cert_and_price(postgres: str) -> None:
     assert _prices(postgres) == before_prices
 
 
+@pytest.mark.migration_start(_BIGINT)
 def test_lab_identity_is_noop_when_devices_are_absent(postgres: str) -> None:
     _upgrade(postgres, _BIGINT)
     eng = create_engine(postgres)
