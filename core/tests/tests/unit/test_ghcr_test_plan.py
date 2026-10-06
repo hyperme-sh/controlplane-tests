@@ -861,7 +861,7 @@ def test_product_revision_changes_only_its_image_head(tmp_path):
     versions = tmp_path / "alembic/versions"
     before = plan.alembic_head.deployment_heads(versions)
     (tmp_path / "migration_chains/hypermesh/versions/planted.py").write_text(
-        'revision = "hypermesh_new"\ndown_revision = "hypermesh_0053_baseline"\n')
+        f'revision = "hypermesh_new"\ndown_revision = "{before["hypermesh"]}"\n')
     after = plan.alembic_head.deployment_heads(versions)
     assert after["hypermesh"] == "hypermesh_new"
     assert {k:v for k,v in before.items() if k != "hypermesh"} == {k:v for k,v in after.items() if k != "hypermesh"}
