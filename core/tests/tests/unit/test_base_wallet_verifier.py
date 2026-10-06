@@ -280,3 +280,89 @@ async def test_base_mainnet_supported():
             )
             == ACCOUNT.address
         )
+
+
+DELEGATION = b"\xef\x01\x00" + bytes.fromhex(OTHER.address[2:])
+ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
+@pytest.mark.asyncio
+async def test_delegated_eoa_accepts_personal_signature_without_contract_call():
+    verifier, client, calls = make_verifier(code="0x" + DELEGATION.hex())
+    async with client:
+        assert await verify(verifier) == ACCOUNT.address
+    assert [c["method"] for c in calls] == [
+        "eth_chainId",
+        "eth_blockNumber",
+        "eth_getCode",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "signature",
+    [
+        b"contract-only proof",
+        bytes(65),
+        bytes(OTHER.sign_message(encode_defunct(text=MESSAGE)).signature),
+    ],
+)
+async def test_delegated_account_falls_back_to_1271(signature):
+    verifier, client, calls = make_verifier(code="0x" + DELEGATION.hex())
+    async with client:
+        assert (
+            await verifier.verify_personal_signature(
+                address=ACCOUNT.address,
+                message=MESSAGE,
+                signature=signature,
+                chain_id=84532,
+            )
+            == ACCOUNT.address
+        )
+    call, block = calls[-1]["params"]
+    assert calls[-1]["method"] == "eth_call"
+    assert call["to"] == ACCOUNT.address and block == "0x123"
+    _, forwarded = decode(["bytes32", "bytes"], bytes.fromhex(call["data"][2:])[4:])
+    assert forwarded == signature
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    [
+        DELEGATION[:-1],
+        DELEGATION + b"\x00",
+        b"\xef\x01\x01" + DELEGATION[3:],
+        b"\x60\x00",
+    ],
+)
+async def test_only_exact_delegation_designator_enables_ecdsa(code):
+    verifier, client, calls = make_verifier(code="0x" + code.hex(), result="0x")
+    with pytest.raises(WalletProofError):
+        async with client:
+            await verify(verifier)
+    assert calls[-1]["method"] == "eth_call"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [b"", DELEGATION])
+async def test_high_s_signature_is_not_accepted_by_recovery(code):
+    high_s = (
+        SIGNATURE[:32]
+        + (ORDER - int.from_bytes(SIGNATURE[32:64], "big")).to_bytes(32, "big")
+        + bytes([55 - SIGNATURE[64]])
+    )
+    assert (
+        Account.recover_message(encode_defunct(text=MESSAGE), signature=high_s)
+        == ACCOUNT.address
+    )
+    verifier, client, calls = make_verifier(code="0x" + code.hex(), result="0x")
+    with pytest.raises(WalletProofError):
+        async with client:
+            await verifier.verify_personal_signature(
+                address=ACCOUNT.address,
+                message=MESSAGE,
+                signature=high_s,
+                chain_id=84532,
+            )
+    assert (calls[-1]["method"] == "eth_call") == bool(code)
