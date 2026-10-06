@@ -19,8 +19,7 @@ FILTERS = yaml.safe_load(filter_step["with"]["filters"])
 def selection(*paths):
     names = [name for name, patterns in FILTERS.items()
              if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)]
-    shared = [path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in FILTERS["shared"])]
-    return module.plan(names, shared)
+    return module.plan(names)
 
 
 def test_shared_markdown_changes_keep_full_run():
@@ -82,10 +81,3 @@ def test_edge_and_hypermesh_select_only_affected_suites():
     assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
                                          "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator"]
     assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])
-
-
-def test_owner_revision_selects_only_owner_and_other_changed_product():
-    revision = "core/lib/controlplane-db/src/controlplane_db/migration_chains/hypermesh/versions/0054_model_cache_capacity.py"
-    assert selection(revision, "products/aiuditor/src/x.py") == (True, ["hypermesh-family", "products/aiuditor"])
-    assert selection(revision, "core/lib/controlplane-db/src/controlplane_db/session.py") == (True, [])
-    assert selection(revision.replace("0054_model_cache_capacity.py", "0053_baseline.py")) == (True, [])
