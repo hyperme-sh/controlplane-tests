@@ -197,6 +197,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     assert migrations.current_heads(url) == migrations.chain_heads()
     after = snapshot(url)
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
+    assert_subject_scope_delta(before, after)
     assert_cache_migration_delta(before, after)
     root = tmp_path / 'chains'
     shutil.copytree(CHAINS, root)
@@ -242,7 +243,9 @@ def test_reload_fresh_database_uses_owner_schema(databases):
     _owners(databases['reload_fresh'])
     after = snapshot(databases['reload_fresh'])
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
-    assert_cache_migration_delta(snapshot(databases['source']), after)
+    before = snapshot(databases['source'])
+    assert_subject_scope_delta(before, after)
+    assert_cache_migration_delta(before, after)
     assert migrations.current_heads(databases['reload_fresh']) == migrations.chain_heads()
 
 
@@ -382,3 +385,23 @@ def test_payout_subject_forward_migration_preserves_receipt_and_refuses_lossy_do
                 )
         finally:
             engine.dispose()
+
+
+def assert_subject_scope_delta(before, after):
+    old = dict(before["tables"]["users"]["indexes"])
+    new = dict(after["tables"]["users"]["indexes"])
+    assert old.pop("ix_users_keycloak_sub_unique") == (
+        "CREATE UNIQUE INDEX ix_users_keycloak_sub_unique ON public.users "
+        "USING btree (keycloak_sub) WHERE (keycloak_sub IS NOT NULL)"
+    )
+    assert new.pop("uq_users_platform_keycloak_sub") == (
+        "CREATE UNIQUE INDEX uq_users_platform_keycloak_sub ON public.users "
+        "USING btree (keycloak_sub) WHERE ((tenant_id IS NULL) AND (keycloak_sub IS NOT NULL))"
+    )
+    assert new.pop("uq_users_tenant_keycloak_sub") == (
+        "CREATE UNIQUE INDEX uq_users_tenant_keycloak_sub ON public.users "
+        "USING btree (tenant_id, keycloak_sub) WHERE ((tenant_id IS NOT NULL) AND (keycloak_sub IS NOT NULL))"
+    )
+    assert old == new
+    # Other schema fields still compare exactly in the existing delta check.
+    after["tables"]["users"]["indexes"] = before["tables"]["users"]["indexes"]
