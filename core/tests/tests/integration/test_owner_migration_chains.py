@@ -197,13 +197,14 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     assert migrations.current_heads(url) == migrations.chain_heads()
     after = snapshot(url)
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
+    assert_journal_schema_delta(after)
     assert_subject_scope_delta(before, after)
     assert_cache_migration_delta(before, after)
     root = tmp_path / 'chains'
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
 revision = 'payment_reload_0054'
-down_revision = 'payment_service_0055_subject'
+down_revision = 'payment_service_0056_journal'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -243,6 +244,7 @@ def test_reload_fresh_database_uses_owner_schema(databases):
     _owners(databases['reload_fresh'])
     after = snapshot(databases['reload_fresh'])
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
+    assert_journal_schema_delta(after)
     before = snapshot(databases['source'])
     assert_subject_scope_delta(before, after)
     assert_cache_migration_delta(before, after)
@@ -255,7 +257,7 @@ def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
 revision = 'payment_failure_0054'
-down_revision = 'payment_service_0055_subject'
+down_revision = 'payment_service_0056_journal'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -374,7 +376,7 @@ def test_payout_subject_forward_migration_preserves_receipt_and_refuses_lossy_do
                 )
             assert (
                 migrations.current_heads(url)["payment_service"]
-                == "payment_service_0055_subject"
+                == migrations.chain_heads()["payment_service"]
             )
             with engine.connect() as connection:
                 assert (
@@ -405,3 +407,10 @@ def assert_subject_scope_delta(before, after):
     assert old == new
     # Other schema fields still compare exactly in the existing delta check.
     after["tables"]["users"]["indexes"] = before["tables"]["users"]["indexes"]
+
+
+def assert_journal_schema_delta(after):
+    for table in ("usdc_ledger_postings", "usdc_ledger_entries"):
+        assert after["tables"].pop(table)["rls"] == [True, True]
+    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()"):
+        assert after["functions"].pop(function)

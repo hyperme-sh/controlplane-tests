@@ -74,3 +74,21 @@ def test_sql_values_and_comments_are_not_table_references():
     assert checker.sql_tables(
         "SELECT 'FROM hypermesh_leases' -- FROM hypermesh_payouts\nFROM users"
     ) == {"users"}
+
+
+def test_trigger_events_and_select_into_preserve_actual_table_references():
+    assert checker.sql_tables("""
+        SELECT sealed INTO is_sealed FROM public.usdc_ledger_postings FOR UPDATE;
+        SELECT count(*), sum(amount_atoms) INTO lines, total FROM public.usdc_ledger_entries;
+        CREATE TRIGGER guard BEFORE UPDATE OR DELETE ON public.usdc_ledger_entries
+          FOR EACH ROW EXECUTE FUNCTION public.guard();
+        UPDATE public.usdc_ledger_postings SET sealed = true;
+        INSERT INTO public.usdc_ledger_entries VALUES (1);
+        DELETE FROM public.usdc_ledger_entries;
+    """) == {"usdc_ledger_postings", "usdc_ledger_entries"}
+
+
+def test_trigger_target_is_checked_without_dml_references():
+    assert checker.sql_tables(
+        "CREATE CONSTRAINT TRIGGER guard AFTER INSERT OR UPDATE ON public.hypermesh_leases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.guard();"
+    ) == {"hypermesh_leases"}
