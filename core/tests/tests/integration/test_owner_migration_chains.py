@@ -319,6 +319,25 @@ def assert_cache_migration_delta(before, after):
         ['file_hash', 'character varying(256)', False, None, '', '', '"default"'],
         ['size_bytes', 'bigint', False, None, '', '', None],
     ])
+    expected['tables']['hypermesh_host_registrations']['columns'].append(
+        ['machine_identity', 'jsonb', False, None, '', '', None])
+    expected['tables']['aiuditor_connections']['columns'].append(
+        ['control_plane_id', 'character varying(128)', True, "'local'::character varying", '', '', '"default"'])
+    identity = after['tables'].pop('aiuditor_machine_identities')
+    assert identity['rls'] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in identity['columns']] == [
+        ('authority_id', 'character varying(128)', True),
+        ('tenant_id', 'uuid', True),
+        ('control_plane_id', 'character varying(128)', True),
+        ('device_id', 'uuid', True),
+        ('request_id', 'uuid', True),
+        ('state', 'jsonb', True),
+        ('revoked', 'boolean', True),
+    ]
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (authority_id, tenant_id, control_plane_id, device_id)' for c in identity['constraints'])
+    assert len(identity['policies']) == 1
+    assert 'app.current_tenant_id' in identity['policies'][0][4]
+    assert 'app.current_tenant_id' in identity['policies'][0][5]
     assert after == expected
 
 
