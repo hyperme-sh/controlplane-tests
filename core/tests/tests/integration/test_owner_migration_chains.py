@@ -350,6 +350,13 @@ def assert_cache_migration_delta(before, after):
     ]
     assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, site_id)' for c in sites['constraints'])
     assert len(sites['policies']) == 4
+    tokens = expected['tables']['hypermesh_site_tokens']
+    tokens['policies'].append([
+        'site_token_lookup_by_hash', 'r', True, ['PUBLIC'],
+        "((secret_hash)::text = NULLIF(current_setting('app.site_token_hash'::text, true), ''::text))",
+        None,
+    ])
+    tokens['policies'].sort(key=lambda row: row[0])
     assert after == expected
 
 
