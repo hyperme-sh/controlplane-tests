@@ -176,6 +176,12 @@ def test_nested_dynamic_sql_into_targets_stay_in_scan():
         "$f$INSERT INTO users SELECT * FROM hypermesh_leases$f$;"
     )
 
+def test_or_replace_trigger_target_is_checked():
+    assert checker.sql_tables(
+        "CREATE OR REPLACE TRIGGER guard BEFORE INSERT ON public.hypermesh_leases "
+        "FOR EACH ROW EXECUTE FUNCTION public.guard();"
+    ) == {"hypermesh_leases"}
+
 def test_trigger_target_is_checked_without_dml_references():
     assert checker.sql_tables(
         "CREATE CONSTRAINT TRIGGER guard AFTER INSERT OR UPDATE ON public.hypermesh_leases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.guard();"
