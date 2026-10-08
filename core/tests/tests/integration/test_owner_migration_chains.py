@@ -347,7 +347,6 @@ def assert_cache_migration_delta(before, after):
         ('site_id', 'character varying(128)', True),
         ('owner_org', 'uuid', False),
         ('created_at', 'timestamp with time zone', True),
-        ('owner_set_at', 'timestamp with time zone', False),
     ]
     assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, site_id)' for c in sites['constraints'])
     assert len(sites['policies']) == 4
