@@ -148,6 +148,20 @@ def test_select_into_in_non_plpgsql_body_stays_in_scan():
     )
 
 
+def test_other_dollar_literals_cannot_declare_the_body_language():
+    assert "hypermesh_leases" in checker.sql_tables(
+        "CREATE PROCEDURE f(x text DEFAULT $$LANGUAGE plpgsql$$) LANGUAGE sql AS "
+        "$b$ SELECT * INTO hypermesh_leases FROM host_payout_addresses $b$;"
+    )
+    assert "hypermesh_leases" in checker.sql_tables(
+        "CREATE FUNCTION f(x text DEFAULT $d$ ; $d$) RETURNS void AS "
+        "$b$ SELECT * INTO hypermesh_leases FROM users $b$ LANGUAGE sql;"
+    )
+    assert checker.sql_tables(
+        "CREATE FUNCTION f(x text DEFAULT $d$LANGUAGE sql$d$) RETURNS void "
+        "LANGUAGE plpgsql AS $b$ BEGIN SELECT 1 INTO hypermesh_leases; END $b$;"
+    ) == set()
+
 def test_trigger_target_is_checked_without_dml_references():
     assert checker.sql_tables(
         "CREATE CONSTRAINT TRIGGER guard AFTER INSERT OR UPDATE ON public.hypermesh_leases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.guard();"
