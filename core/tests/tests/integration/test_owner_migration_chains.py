@@ -451,5 +451,5 @@ def assert_journal_schema_delta(after):
     assert sequence["definition"][0][1:4] == [0, 1, 2147483647]
     for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents"):
         assert after["tables"].pop(table)["rls"] == [True, True]
-    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()"):
+    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()"):
         assert after["functions"].pop(function)
