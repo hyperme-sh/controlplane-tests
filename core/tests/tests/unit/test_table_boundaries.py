@@ -95,14 +95,20 @@ def test_trigger_events_and_select_into_preserve_actual_table_references():
     """) == {"usdc_ledger_postings", "usdc_ledger_entries"}
 
 
-def test_plpgsql_select_into_targets_are_variables():
+def test_plpgsql_into_targets_are_variables():
     assert checker.sql_tables(
         "DO $body$ DECLARE hypermesh_leases int; BEGIN "
         "SELECT count(*) INTO STRICT hypermesh_leases FROM users; END $body$;"
     ) == {"users"}
     assert checker.sql_tables(
-        "CREATE FUNCTION f() RETURNS void AS $$ BEGIN "
-        "SELECT id INTO NEW.lease_id FROM users; END $$ LANGUAGE plpgsql;"
+        "CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN "
+        "SELECT id INTO NEW.lease_id FROM users; RETURN NEW; END $$ LANGUAGE plpgsql;"
+    ) == {"users"}
+    assert checker.sql_tables(
+        "CREATE FUNCTION f() RETURNS void LANGUAGE 'plpgsql' AS $$ "
+        "DECLARE hypermesh_leases int; BEGIN SELECT 1 INTO hypermesh_leases; "
+        "INSERT INTO users DEFAULT VALUES RETURNING id INTO hypermesh_payouts; "
+        "END $$;"
     ) == {"users"}
 
 
@@ -122,9 +128,20 @@ def test_top_level_select_into_targets_stay_in_scan():
 
 
 def test_select_into_in_non_plpgsql_body_stays_in_scan():
+    for language in ("sql", "'sql'", '"sql"', "'SQL'"):
+        assert "hypermesh_leases" in checker.sql_tables(
+            f"CREATE FUNCTION f() RETURNS void LANGUAGE {language} AS $$ "
+            "SELECT * INTO hypermesh_leases FROM users $$;"
+        )
+        assert "hypermesh_leases" in checker.sql_tables(
+            "CREATE FUNCTION f() RETURNS void AS $$ "
+            f"SELECT * INTO hypermesh_leases FROM users $$ LANGUAGE {language};"
+        )
     assert "hypermesh_leases" in checker.sql_tables(
-        "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ "
-        "SELECT * INTO hypermesh_leases FROM users $$;"
+        "SELECT $$text$$ AS note INTO hypermesh_leases FROM users;"
+    )
+    assert "hypermesh_leases" in checker.sql_tables(
+        "DO $$ BEGIN INSERT INTO hypermesh_leases DEFAULT VALUES; END $$;"
     )
     assert "hypermesh_leases" in checker.sql_tables(
         "DO $$ BEGIN PERFORM 1; END $$; SELECT * INTO hypermesh_leases FROM users;"
