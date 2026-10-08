@@ -78,14 +78,57 @@ def test_sql_values_and_comments_are_not_table_references():
 
 def test_trigger_events_and_select_into_preserve_actual_table_references():
     assert checker.sql_tables("""
-        SELECT sealed INTO is_sealed FROM public.usdc_ledger_postings FOR UPDATE;
-        SELECT count(*), sum(amount_atoms) INTO lines, total FROM public.usdc_ledger_entries;
+        CREATE FUNCTION public.guard() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        DECLARE is_sealed boolean; lines bigint; total numeric;
+        BEGIN
+          SELECT sealed INTO is_sealed FROM public.usdc_ledger_postings FOR UPDATE;
+          SELECT count(*), sum(amount_atoms) INTO lines, total
+            FROM public.usdc_ledger_entries;
+          RETURN NEW;
+        END $$;
         CREATE TRIGGER guard BEFORE UPDATE OR DELETE ON public.usdc_ledger_entries
           FOR EACH ROW EXECUTE FUNCTION public.guard();
         UPDATE public.usdc_ledger_postings SET sealed = true;
         INSERT INTO public.usdc_ledger_entries VALUES (1);
         DELETE FROM public.usdc_ledger_entries;
     """) == {"usdc_ledger_postings", "usdc_ledger_entries"}
+
+
+def test_plpgsql_select_into_targets_are_variables():
+    assert checker.sql_tables(
+        "DO $body$ DECLARE hypermesh_leases int; BEGIN "
+        "SELECT count(*) INTO STRICT hypermesh_leases FROM users; END $body$;"
+    ) == {"users"}
+    assert checker.sql_tables(
+        "CREATE FUNCTION f() RETURNS void AS $$ BEGIN "
+        "SELECT id INTO NEW.lease_id FROM users; END $$ LANGUAGE plpgsql;"
+    ) == {"users"}
+
+
+def test_top_level_select_into_targets_stay_in_scan():
+    assert checker.sql_tables("SELECT * INTO hypermesh_leases FROM users") == {
+        "hypermesh_leases",
+        "users",
+    }
+    assert checker.sql_tables("SELECT id INTO public.hypermesh_leases FROM users") == {
+        "hypermesh_leases",
+        "users",
+    }
+    for modifier in ("TABLE", "TEMP", "TEMPORARY TABLE", "UNLOGGED TABLE"):
+        assert {"hypermesh_leases", "users"} <= checker.sql_tables(
+            f"SELECT * INTO {modifier} hypermesh_leases FROM users;"
+        )
+
+
+def test_select_into_in_non_plpgsql_body_stays_in_scan():
+    assert "hypermesh_leases" in checker.sql_tables(
+        "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ "
+        "SELECT * INTO hypermesh_leases FROM users $$;"
+    )
+    assert "hypermesh_leases" in checker.sql_tables(
+        "DO $$ BEGIN PERFORM 1; END $$; SELECT * INTO hypermesh_leases FROM users;"
+    )
 
 
 def test_trigger_target_is_checked_without_dml_references():
