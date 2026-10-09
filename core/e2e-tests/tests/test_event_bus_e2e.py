@@ -67,33 +67,24 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
         app.dependency_overrides[get_current_user] = _user
         app.dependency_overrides[get_current_tenant] = _tenant
 
-    br_id = uuid.uuid4()
-    with eng.begin() as cx:
-        cx.execute(
-            text(
-                """
-                INSERT INTO billing_records (
-                    id, tenant_id, scope, actor, payment_type, currency, status,
-                    stripe_session_id, metadata
-                )
-                VALUES (
-                    :id, :tid, 'checkout', 'user', 'stripe_checkout', 'usd', 'pending',
-                    'cs_e2e_session', '{}'::jsonb
-                )
-                """
-            ),
-            {"id": br_id, "tid": ta},
-        )
-
+    # A paid subscription invoice is the payment that grants the plan.
     obj = SimpleNamespace(
-        id="cs_e2e_session",
+        id="in_e2e_invoice",
         metadata={"tenant_id": str(ta)},
-        amount_total=1999,
+        amount_paid=1999,
+        amount_due=1999,
         currency="usd",
+        customer="cus_e2e_1",
+        subscription="sub_e2e_1",
         payment_intent="pi_e2e_1",
+        billing_reason="subscription_create",
+        hosted_invoice_url="https://invoice.example/e2e",
+        lines=SimpleNamespace(
+            data=[SimpleNamespace(price=SimpleNamespace(id="price_e2e_1", product="prod_e2e_1"))]
+        ),
     )
     ev = SimpleNamespace(
-        type="checkout.session.completed",
+        type="invoice.paid",
         data=SimpleNamespace(object=obj),
     )
 

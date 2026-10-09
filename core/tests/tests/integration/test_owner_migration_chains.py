@@ -357,6 +357,10 @@ def assert_cache_migration_delta(before, after):
         None,
     ])
     tokens['policies'].sort(key=lambda row: row[0])
+    expected['tables']['hypermesh_leases']['columns'].extend([
+        ['payment_amount_atoms', 'bigint', False, None, '', '', None],
+        ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
+    ])
     assert after == expected
 
 
