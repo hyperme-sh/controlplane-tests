@@ -353,6 +353,9 @@ def assert_cache_migration_delta(before, after):
     assert 'app.current_tenant_id' in scoped['policies'][0][5]
     validations = after['tables'].pop('hypermesh_model_validations')
     assert validations['rls'] == [True, True]
+    index = dict(validations['indexes'])['ix_hm_validation_planned_device']
+    assert '(tenant_id, lab_device_id, created_at, expires_at)' in index
+    assert "'planned'::text" in index
     assert {c[0] for c in validations['columns']} == {
         'id', 'tenant_id', 'owner_sub', 'revision_id', 'request_id', 'profile_id',
         'target', 'target_sha256', 'lab_job_id', 'lab_device_id', 'state',
