@@ -204,7 +204,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
 revision = 'payment_reload_0054'
-down_revision = 'payment_service_0058_transfers'
+down_revision = 'payment_service_0060_onramp'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -257,7 +257,7 @@ def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
 revision = 'payment_failure_0054'
-down_revision = 'payment_service_0058_transfers'
+down_revision = 'payment_service_0060_onramp'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -370,7 +370,16 @@ def assert_cache_migration_delta(before, after):
     expected['tables']['hypermesh_leases']['columns'].extend([
         ['payment_amount_atoms', 'bigint', False, None, '', '', None],
         ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
+        ['close_requested_at', 'timestamp with time zone', False, None, '', '', None],
     ])
+    lease_indexes = expected['tables']['hypermesh_leases']['indexes']
+    lease_indexes.append([
+        'ix_hm_leases_tenant_live',
+        "CREATE INDEX ix_hm_leases_tenant_live ON public.hypermesh_leases USING btree "
+        "(tenant_id, status) WHERE ((status)::text = ANY ((ARRAY['starting'::character varying, "
+        "'active'::character varying])::text[]))",
+    ])
+    lease_indexes.sort(key=lambda row: row[0])
     assert after == expected
 
 
@@ -463,7 +472,7 @@ def assert_journal_schema_delta(after):
     sequence = after["sequences"].pop("usdc_deposit_addresses_hd_index_seq")
     assert sequence["owned_by"] == [["usdc_deposit_addresses", "hd_index"]]
     assert sequence["definition"][0][1:4] == [0, 1, 2147483647]
-    for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents", "usdc_chain_transfers"):
+    for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents", "usdc_chain_transfers", "usdc_outbound_transfers", "onramp_sessions"):
         assert after["tables"].pop(table)["rls"] == [True, True]
-    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()", "usdc_transfer_progress_only()"):
+    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()", "usdc_transfer_progress_only()", "usdc_outbound_progress_only()", "onramp_progress_only()"):
         assert after["functions"].pop(function)
