@@ -314,6 +314,8 @@ def assert_cache_migration_delta(before, after):
         'CHECK (model_cache_available_bytes IS NULL OR model_cache_available_bytes >= 0)', True])
     health['constraints'].sort(key=lambda row: row[0])
     jobs = expected['tables']['hypermesh_jobs']
+    jobs['indexes'].append(['ix_hm_jobs_pending_device', "CREATE INDEX ix_hm_jobs_pending_device ON public.hypermesh_jobs USING btree (tenant_id, device_id, created_at, id) WHERE ((status)::text = 'pending'::text)"])
+    jobs['indexes'].sort(key=lambda row: row[0])
     for column in jobs['columns']:
         if column[0] == 'source_ref':
             column[1] = 'character varying(1024)'
