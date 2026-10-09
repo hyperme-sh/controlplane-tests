@@ -361,6 +361,14 @@ def assert_cache_migration_delta(before, after):
         ['payment_amount_atoms', 'bigint', False, None, '', '', None],
         ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
     ])
+    lease_indexes = expected['tables']['hypermesh_leases']['indexes']
+    lease_indexes.append([
+        'ix_hm_leases_tenant_live',
+        "CREATE INDEX ix_hm_leases_tenant_live ON public.hypermesh_leases USING btree "
+        "(tenant_id, status) WHERE ((status)::text = ANY ((ARRAY['starting'::character varying, "
+        "'active'::character varying])::text[]))",
+    ])
+    lease_indexes.sort(key=lambda row: row[0])
     assert after == expected
 
 
