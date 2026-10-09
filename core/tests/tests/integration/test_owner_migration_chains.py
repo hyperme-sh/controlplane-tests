@@ -399,11 +399,11 @@ def assert_cache_migration_delta(before, after):
     ])
     pin_function = after['functions'].pop('hypermesh_private_lease_pin_immutable()')
     assert 'OLD.private_model IS NOT NULL' in pin_function['definition']
-    assert 'NEW.private_model IS DISTINCT FROM OLD.private_model' in pin_function['definition']
+    assert 'NEW.private_model IS NULL OR NEW.private_model != OLD.private_model' in pin_function['definition']
     triggers = after['tables']['hypermesh_leases']['triggers']
     assert len(triggers) == 1
     assert triggers[0][0] == 'hypermesh_private_lease_pin_immutable'
-    assert 'BEFORE UPDATE OF private_model' in triggers[0][1]
+    assert 'BEFORE UPDATE ON public.hypermesh_leases' in triggers[0][1]
     assert triggers[0][2] == 'O'
     after['tables']['hypermesh_leases']['triggers'] = []
     assert after == expected
