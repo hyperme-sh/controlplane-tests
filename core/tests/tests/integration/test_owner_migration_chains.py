@@ -358,7 +358,8 @@ def assert_cache_migration_delta(before, after):
         ('gateway_id', 'uuid', True),
         ('lease_id', 'uuid', True),
     ]
-    assert len(flags['policies']) == 4
+    assert len(flags['policies']) == 6
+    assert any('app.safety_flag_retention' in str(policy) for policy in flags['policies'])
     tokens = expected['tables']['hypermesh_site_tokens']
     tokens['policies'].append([
         'site_token_lookup_by_hash', 'r', True, ['PUBLIC'],
