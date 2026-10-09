@@ -355,7 +355,7 @@ def assert_cache_migration_delta(before, after):
         'id', 'tenant_id', 'owner_sub', 'request_id', 'name', 'license', 'size_bytes',
         'state', 'manifest', 'storage_account', 'storage_container', 'sealed_files',
         'expires_at', 'created_at', 'sealed_at', 'scan_evidence', 'scan_state',
-        'inspection', 'inspection_claim_id', 'inspection_claim_until',
+        'inspection', 'inspection_claim_id', 'inspection_claim_until', 'inspection_failures',
     }
     assert len(revisions['policies']) == 1
     assert 'app.current_tenant_id' in revisions['policies'][0][4]
