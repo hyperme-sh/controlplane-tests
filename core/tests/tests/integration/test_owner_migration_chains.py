@@ -394,6 +394,16 @@ def assert_cache_migration_delta(before, after):
     ]
     assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, site_id)' for c in sites['constraints'])
     assert len(sites['policies']) == 4
+    flags = after['tables'].pop('hypermesh_safety_flags')
+    assert flags['rls'] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in flags['columns']][:4] == [
+        ('id', 'uuid', True),
+        ('tenant_id', 'uuid', True),
+        ('gateway_id', 'uuid', True),
+        ('lease_id', 'uuid', True),
+    ]
+    assert len(flags['policies']) == 6
+    assert any('app.safety_flag_retention' in str(policy) for policy in flags['policies'])
     tokens = expected['tables']['hypermesh_site_tokens']
     tokens['policies'].append([
         'site_token_lookup_by_hash', 'r', True, ['PUBLIC'],
