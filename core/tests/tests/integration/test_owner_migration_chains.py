@@ -390,7 +390,17 @@ def assert_cache_migration_delta(before, after):
     expected['tables']['hypermesh_leases']['columns'].extend([
         ['payment_amount_atoms', 'bigint', False, None, '', '', None],
         ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
+        ['private_model', 'jsonb', False, None, '', '', None],
     ])
+    pin_function = after['functions'].pop('hypermesh_private_lease_pin_immutable()')
+    assert 'OLD.private_model IS NOT NULL' in pin_function['definition']
+    assert 'NEW.private_model IS DISTINCT FROM OLD.private_model' in pin_function['definition']
+    triggers = after['tables']['hypermesh_leases']['triggers']
+    assert len(triggers) == 1
+    assert triggers[0][0] == 'hypermesh_private_lease_pin_immutable'
+    assert 'BEFORE UPDATE OF private_model' in triggers[0][1]
+    assert triggers[0][2] == 'O'
+    after['tables']['hypermesh_leases']['triggers'] = []
     assert after == expected
 
 
