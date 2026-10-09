@@ -367,6 +367,13 @@ def assert_cache_migration_delta(before, after):
     assert storage_health['rls'] == [True, True]
     assert {c[0] for c in storage_health['columns']} == {'tenant_id', 'account', 'observed_at', 'physical_bytes', 'version_count', 'queue_age_seconds', 'janitor_at', 'healthy'}
     assert len(storage_health['policies']) == 1
+    callbacks = after['tables'].pop('hypermesh_payment_callback_claims')
+    assert callbacks['rls'] == [True, True]
+    assert {c[0] for c in callbacks['columns']} == {'tenant_id', 'billing_record_id', 'token', 'expires_at'}
+    assert len(callbacks['policies']) == 1
+    assert 'app.current_tenant_id' in callbacks['policies'][0][4]
+    assert 'app.current_tenant_id' in callbacks['policies'][0][5]
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, billing_record_id)' for c in callbacks['constraints'])
     claims = after['tables'].pop('hypermesh_model_poll_claims')
     assert claims['rls'] == [True, True]
     assert {c[0] for c in claims['columns']} == {'tenant_id', 'device_id', 'token', 'expires_at'}
@@ -396,6 +403,16 @@ def assert_cache_migration_delta(before, after):
     ]
     assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, site_id)' for c in sites['constraints'])
     assert len(sites['policies']) == 4
+    flags = after['tables'].pop('hypermesh_safety_flags')
+    assert flags['rls'] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in flags['columns']][:4] == [
+        ('id', 'uuid', True),
+        ('tenant_id', 'uuid', True),
+        ('gateway_id', 'uuid', True),
+        ('lease_id', 'uuid', True),
+    ]
+    assert len(flags['policies']) == 6
+    assert any('app.safety_flag_retention' in str(policy) for policy in flags['policies'])
     tokens = expected['tables']['hypermesh_site_tokens']
     tokens['policies'].append([
         'site_token_lookup_by_hash', 'r', True, ['PUBLIC'],
