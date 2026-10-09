@@ -340,6 +340,16 @@ def assert_cache_migration_delta(before, after):
     assert len(identity['policies']) == 1
     assert 'app.current_tenant_id' in identity['policies'][0][4]
     assert 'app.current_tenant_id' in identity['policies'][0][5]
+    revisions = after['tables'].pop('hypermesh_model_revisions')
+    assert revisions['rls'] == [True, True]
+    assert {c[0] for c in revisions['columns']} == {
+        'id', 'tenant_id', 'owner_sub', 'request_id', 'name', 'license', 'size_bytes',
+        'state', 'manifest', 'storage_account', 'storage_container', 'sealed_files',
+        'expires_at', 'created_at', 'sealed_at',
+    }
+    assert len(revisions['policies']) == 1
+    assert 'app.current_tenant_id' in revisions['policies'][0][4]
+    assert 'app.current_tenant_id' in revisions['policies'][0][5]
     sites = after['tables'].pop('hypermesh_sites')
     assert sites['rls'] == [True, True]
     assert [(c[0], c[1], c[2]) for c in sites['columns']] == [
