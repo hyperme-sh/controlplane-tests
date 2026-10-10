@@ -204,7 +204,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_reload.py').write_text("""from alembic import op
 revision = 'payment_reload_0054'
-down_revision = 'payment_service_0060_onramp'
+down_revision = 'payment_service_0061_connect'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -257,7 +257,7 @@ def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
     shutil.copytree(CHAINS, root)
     (root / 'payment_service/versions/0054_failure.py').write_text("""from alembic import op
 revision = 'payment_failure_0054'
-down_revision = 'payment_service_0060_onramp'
+down_revision = 'payment_service_0061_connect'
 branch_labels = None
 depends_on = None
 def upgrade():
@@ -588,7 +588,7 @@ def assert_journal_schema_delta(after):
     sequence = after["sequences"].pop("usdc_deposit_addresses_hd_index_seq")
     assert sequence["owned_by"] == [["usdc_deposit_addresses", "hd_index"]]
     assert sequence["definition"][0][1:4] == [0, 1, 2147483647]
-    for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents", "usdc_chain_transfers", "usdc_outbound_transfers", "onramp_sessions"):
+    for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents", "usdc_chain_transfers", "usdc_outbound_transfers", "onramp_sessions", "connect_recipient_accounts"):
         assert after["tables"].pop(table)["rls"] == [True, True]
-    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()", "usdc_transfer_progress_only()", "usdc_outbound_progress_only()", "onramp_progress_only()"):
+    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()", "usdc_transfer_progress_only()", "usdc_outbound_progress_only()", "onramp_progress_only()", "connect_recipient_progress_only()", "connect_recipient_immutable()"):
         assert after["functions"].pop(function)
