@@ -439,6 +439,46 @@ def assert_cache_migration_delta(before, after):
         ['private_model', 'jsonb', False, None, '', '', None],
         ['offer_request_sha256', 'character varying(64)', False, None, '', '', '"default"'],
     ])
+    # Explicitly validate the additive protection registry before comparing the
+    # remaining schema with the frozen baseline. Neither baseline is rewritten.
+    expected['tables']['hypermesh_leases']['columns'].extend([
+        ['protection_policy_version', 'integer', True, '1', '', '', None],
+        ['protection_requirements', 'jsonb', True, "'[]'::jsonb", '', '', None],
+    ])
+    approvals = after['tables'].pop('hypermesh_protection_approvals')
+    assert approvals['rls'] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in approvals['columns']] == [
+        ('id', 'uuid', True), ('tenant_id', 'uuid', True),
+        ('device_id', 'uuid', True), ('mode', 'character varying(32)', True),
+        ('binding', 'jsonb', True), ('evidence_sha256', 'character varying(64)', True),
+        ('reviewed_by', 'uuid', True), ('observed_at', 'timestamp with time zone', True),
+        ('reviewed_at', 'timestamp with time zone', True), ('expires_at', 'timestamp with time zone', True),
+        ('revoked_at', 'timestamp with time zone', False), ('revoked_by', 'uuid', False),
+        ('revocation_reason', 'character varying(256)', False),
+    ]
+    assert len(approvals['policies']) == 4
+    assert all('app.current_tenant_id' in str(policy) for policy in approvals['policies'])
+    assert any(index[0] == 'ix_hm_protection_device' and '(tenant_id, device_id, expires_at)' in index[1] for index in approvals['indexes'])
+    assert {c[0] for c in approvals['constraints'] if c[1] == 'c'} == {
+        'ck_hm_protection_mode', 'ck_hm_protection_window',
+        'ck_hm_protection_digest', 'ck_hm_protection_revocation',
+    }
+    protection_function = after['functions'].pop('hm_protection_immutable()')
+    assert 'NEW.protection_requirements <> OLD.protection_requirements' in protection_function['definition']
+    assert 'OLD.revoked_at IS NOT NULL' in protection_function['definition']
+    assert len(approvals['triggers']) == 1
+    assert approvals['triggers'][0][0] == 'protection_immutable'
+    assert approvals['triggers'][0][2] == 'O'
+    leases = after['tables']['hypermesh_leases']
+    protection_constraint = next(c for c in leases['constraints'] if c[0] == 'ck_hm_lease_protection')
+    assert 'protection_policy_version = 1' in protection_constraint[2]
+    assert 'physical_memory' in protection_constraint[2] and 'confidential_execution' in protection_constraint[2]
+    leases['constraints'].remove(protection_constraint)
+    protection_trigger = next(t for t in leases['triggers'] if t[0] == 'protection_immutable')
+    assert 'BEFORE UPDATE ON public.hypermesh_leases' in protection_trigger[1]
+    assert 'hm_protection_immutable()' in protection_trigger[1]
+    assert protection_trigger[2] == 'O'
+    leases['triggers'].remove(protection_trigger)
     pin_function = after['functions'].pop('hypermesh_private_lease_pin_immutable()')
     assert 'OLD.private_model IS NOT NULL' in pin_function['definition']
     assert 'NEW.private_model IS NULL OR NEW.private_model != OLD.private_model' in pin_function['definition']
