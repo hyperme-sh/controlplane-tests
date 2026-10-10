@@ -314,6 +314,8 @@ def assert_cache_migration_delta(before, after):
         'CHECK (model_cache_available_bytes IS NULL OR model_cache_available_bytes >= 0)', True])
     health['constraints'].sort(key=lambda row: row[0])
     jobs = expected['tables']['hypermesh_jobs']
+    jobs['indexes'].append(['ix_hm_jobs_pending_device', "CREATE INDEX ix_hm_jobs_pending_device ON public.hypermesh_jobs USING btree (tenant_id, device_id, created_at, id) WHERE ((status)::text = 'pending'::text)"])
+    jobs['indexes'].sort(key=lambda row: row[0])
     for column in jobs['columns']:
         if column[0] == 'source_ref':
             column[1] = 'character varying(1024)'
@@ -362,6 +364,20 @@ def assert_cache_migration_delta(before, after):
     assert len(validations['policies']) == 1
     assert 'app.current_tenant_id' in validations['policies'][0][4]
     assert 'app.current_tenant_id' in validations['policies'][0][5]
+    callbacks = after['tables'].pop('hypermesh_payment_callback_claims')
+    assert callbacks['rls'] == [True, True]
+    assert {c[0] for c in callbacks['columns']} == {'tenant_id', 'billing_record_id', 'token', 'expires_at'}
+    assert len(callbacks['policies']) == 1
+    assert 'app.current_tenant_id' in callbacks['policies'][0][4]
+    assert 'app.current_tenant_id' in callbacks['policies'][0][5]
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, billing_record_id)' for c in callbacks['constraints'])
+    claims = after['tables'].pop('hypermesh_model_poll_claims')
+    assert claims['rls'] == [True, True]
+    assert {c[0] for c in claims['columns']} == {'tenant_id', 'device_id', 'token', 'expires_at'}
+    assert len(claims['policies']) == 1
+    assert 'app.current_tenant_id' in claims['policies'][0][4]
+    assert 'app.current_tenant_id' in claims['policies'][0][5]
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id, device_id)' for c in claims['constraints'])
     revisions = after['tables'].pop('hypermesh_model_revisions')
     assert revisions['rls'] == [True, True]
     assert {c[0] for c in revisions['columns']} == {
@@ -404,7 +420,17 @@ def assert_cache_migration_delta(before, after):
         ['payment_amount_atoms', 'bigint', False, None, '', '', None],
         ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
         ['close_requested_at', 'timestamp with time zone', False, None, '', '', None],
+        ['private_model', 'jsonb', False, None, '', '', None],
     ])
+    pin_function = after['functions'].pop('hypermesh_private_lease_pin_immutable()')
+    assert 'OLD.private_model IS NOT NULL' in pin_function['definition']
+    assert 'NEW.private_model IS NULL OR NEW.private_model != OLD.private_model' in pin_function['definition']
+    triggers = after['tables']['hypermesh_leases']['triggers']
+    assert len(triggers) == 1
+    assert triggers[0][0] == 'hypermesh_private_lease_pin_immutable'
+    assert 'BEFORE UPDATE ON public.hypermesh_leases' in triggers[0][1]
+    assert triggers[0][2] == 'O'
+    after['tables']['hypermesh_leases']['triggers'] = []
     lease_indexes = expected['tables']['hypermesh_leases']['indexes']
     lease_indexes.append([
         'ix_hm_leases_tenant_live',
