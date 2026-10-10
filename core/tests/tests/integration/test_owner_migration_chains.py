@@ -364,6 +364,10 @@ def assert_cache_migration_delta(before, after):
     assert len(validations['policies']) == 1
     assert 'app.current_tenant_id' in validations['policies'][0][4]
     assert 'app.current_tenant_id' in validations['policies'][0][5]
+    budget = after['tables'].pop('hypermesh_model_account_budgets')
+    assert {c[0] for c in budget['columns']} == {'account', 'reserved_entries'}
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (account)' for c in budget['constraints'])
+    assert not budget['policies']  # global operational count contains no tenant data
     storage_health = after['tables'].pop('hypermesh_model_storage_health')
     assert storage_health['rls'] == [True, True]
     assert {c[0] for c in storage_health['columns']} == {'tenant_id', 'account', 'observed_at', 'physical_bytes', 'version_count', 'queue_age_seconds', 'janitor_at', 'healthy'}
@@ -391,6 +395,13 @@ def assert_cache_migration_delta(before, after):
         'inspection', 'inspection_claim_id', 'inspection_claim_until', 'inspection_failures',
         'revoked_at', 'delete_requested_at', 'retain_until', 'retention_hold', 'lifecycle_audit', 'cleanup_claim_until',
     }
+    guard = after['functions'].pop('hm_guard_model_revision_delete()')
+    assert "OLD.state <> 'deleted'" in guard['definition']
+    assert 'RAISE EXCEPTION' in guard['definition']
+    assert [(t[0], 'BEFORE DELETE ON public.hypermesh_model_revisions' in t[1]) for t in revisions['triggers']] == [
+        ('hm_model_revision_delete_guard', True),
+    ]
+    revisions['triggers'] = []
     assert len(revisions['policies']) == 1
     assert 'app.current_tenant_id' in revisions['policies'][0][4]
     assert 'app.current_tenant_id' in revisions['policies'][0][5]
