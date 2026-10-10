@@ -395,6 +395,13 @@ def assert_cache_migration_delta(before, after):
         'inspection', 'inspection_claim_id', 'inspection_claim_until', 'inspection_failures',
         'revoked_at', 'delete_requested_at', 'retain_until', 'retention_hold', 'lifecycle_audit', 'cleanup_claim_until',
     }
+    release = after['functions'].pop('hm_release_model_account_entries()')
+    assert "OLD.state <> 'deleted'" in release['definition']
+    assert 'hypermesh_model_account_budgets' in release['definition']
+    assert [(t[0], 'BEFORE DELETE ON public.hypermesh_model_revisions' in t[1]) for t in revisions['triggers']] == [
+        ('hm_model_revision_release_entries', True),
+    ]
+    revisions['triggers'] = []
     assert len(revisions['policies']) == 1
     assert 'app.current_tenant_id' in revisions['policies'][0][4]
     assert 'app.current_tenant_id' in revisions['policies'][0][5]
