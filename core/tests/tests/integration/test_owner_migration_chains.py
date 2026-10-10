@@ -437,6 +437,7 @@ def assert_cache_migration_delta(before, after):
         ['payment_test_credit_available', 'boolean', True, 'false', '', '', None],
         ['close_requested_at', 'timestamp with time zone', False, None, '', '', None],
         ['private_model', 'jsonb', False, None, '', '', None],
+        ['offer_request_sha256', 'character varying(64)', False, None, '', '', '"default"'],
     ])
     pin_function = after['functions'].pop('hypermesh_private_lease_pin_immutable()')
     assert 'OLD.private_model IS NOT NULL' in pin_function['definition']
