@@ -186,3 +186,11 @@ def test_trigger_target_is_checked_without_dml_references():
     assert checker.sql_tables(
         "CREATE CONSTRAINT TRIGGER guard AFTER INSERT OR UPDATE ON public.hypermesh_leases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.guard();"
     ) == {"hypermesh_leases"}
+
+
+def test_row_comparisons_and_locks_do_not_introduce_table_targets():
+    assert checker.sql_tables('''
+        SELECT 1 FROM public.billing_records b WHERE
+        ROW(b.id, b.tenant_id) IS DISTINCT FROM ROW(NEW.id, NEW.tenant_id)
+        AND b.amount IS NOT DISTINCT FROM OLD.amount FOR UPDATE;
+    ''') == {'billing_records'}
