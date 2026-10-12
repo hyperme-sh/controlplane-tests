@@ -49,12 +49,12 @@ def databases():
         # No source connections may remain when copying its schema and data.
         admin = create_engine(url, isolation_level='AUTOCOMMIT')
         with admin.connect() as connection:
-            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh'):
+            for name in ('fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh', 'reload_empty'):
                 template = 'source' if name in ('stamped', 'rollback', 'reload', 'reload_failure', 'marketplace_owners', 'marketplace_legacy') else 'template0'
                 connection.exec_driver_sql(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
         admin.dispose()
         yield {name: url.rsplit('/', 1)[0] + '/' + name for name in
-               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh')}
+               ('source', 'fresh', 'stamped', 'wrong_head', 'isolated', 'rollback', 'no_roles', 'reload', 'unversioned', 'reload_old', 'reload_fresh', 'reload_failure', 'marketplace_owners', 'marketplace_legacy', 'marketplace_fresh', 'reload_empty')}
 
 
 def test_fresh_baselines_match_every_0053_database_object(databases):
@@ -241,7 +241,7 @@ def test_reload_refuses_0052_without_changing_it(databases, monkeypatch):
 
 def test_reload_fresh_database_uses_owner_schema(databases):
     from controlplane_db.startup import _owners
-    _owners(databases['reload_fresh'])
+    _owners(databases['reload_fresh'], allow_empty=True)
     after = snapshot(databases['reload_fresh'])
     assert after['tables'].pop('host_payout_addresses')['rls'] == [True, True]
     assert_journal_schema_delta(after)
@@ -249,6 +249,17 @@ def test_reload_fresh_database_uses_owner_schema(databases):
     assert_subject_scope_delta(before, after)
     assert_cache_migration_delta(before, after)
     assert migrations.current_heads(databases['reload_fresh']) == migrations.chain_heads()
+
+
+def test_reload_refuses_empty_database_without_bootstrap(databases, monkeypatch):
+    from controlplane_db.startup import _owners
+    monkeypatch.delenv('CONTROLPLANE_DB_BOOTSTRAP', raising=False)
+    url = databases['reload_empty']
+    before = snapshot(url)
+    with pytest.raises(ValueError, match='refusing to create one'):
+        _owners(url)
+    assert snapshot(url) == before
+    assert set(migrations.current_heads(url).values()) == {None}
 
 
 def test_reload_upgrade_failure_rolls_back_adoption(databases, tmp_path):
@@ -281,6 +292,7 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
     tenant = uuid.uuid4()
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.setenv("CONTROLPLANE_MIGRATION_MODE", mode)
+    monkeypatch.setenv("CONTROLPLANE_DB_BOOTSTRAP", "1" if database == "marketplace_fresh" else "")
     monkeypatch.setattr(marketplace, "MARKETPLACE_TENANT_ID", tenant)
     assert startup.main() == 0
     assert startup.main() == 0
