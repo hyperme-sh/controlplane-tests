@@ -114,10 +114,14 @@ def test_unknown_revision_ahead_of_image_warns_and_skips(monkeypatch, caplog):
     ]
 
 
-def test_unknown_revision_sharing_the_head_number_is_a_later_revision(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    'later',
+    ['hypermesh_0064_later_sibling', 'hypermesh_0001_lower_number_but_later', 'hypermesh_9999_not_in_this_image'],
+)
+def test_well_formed_unknown_revision_is_trusted_whatever_its_number(monkeypatch, caplog, later):
+    # Numbers are not monotonic along a chain, so they never decide direction.
     heads = migrations.chain_heads()
-    number = heads['hypermesh'].split('_')[1]
-    sibling = f'hypermesh_{number}_later_sibling'
+    sibling = later
     versions = dict(heads)
     versions['hypermesh'] = sibling
     upgraded = _record_upgrades(monkeypatch)
@@ -140,7 +144,6 @@ def test_unknown_revision_sharing_the_head_number_is_a_later_revision(monkeypatc
         'hypermesh_64_short_number',
         'Hypermesh_9999_Typo',  # wrong case
         'platform_9999_other_chain',  # another chain's id
-        'hypermesh_0001_older_than_the_image',  # unknown and older than the head
         'hypermesh_99999_extra_digit',
         '9999_hypermesh_reordered',
         'hypermesh_9999_ok\n',  # trailing newline
@@ -153,7 +156,7 @@ def test_unknown_revision_not_proven_newer_fails_closed(monkeypatch, caplog, rev
     _install_database(monkeypatch, versions, tables=_owned_tables())
 
     with caplog.at_level(logging.WARNING), pytest.raises(
-        ValueError, match='not in this image and is not a later revision of this chain'
+        ValueError, match='not in this image and is not a revision id of this chain'
     ):
         startup._owners('postgresql://example')
 
