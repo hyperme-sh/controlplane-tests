@@ -172,6 +172,8 @@ def test_baseline_inventory_cannot_omit_frozen_tables(tmp_path):
         'op.execute("CREATE CONSTRAINT TRIGGER planted AFTER INSERT ON billing_records DEFERRABLE FOR EACH ROW EXECUTE FUNCTION tax_history_retained()")',
         'op.execute("CREATE TEMP TABLE billing_records (id integer)")',
         'op.execute("SELECT revision_id INTO billing_records FROM billing_tax_orders")',
+        'op.execute("CREATE FUNCTION planted() RETURNS void LANGUAGE sql AS $$ SELECT id INTO billing_records FROM billing_tax_orders $$")',
+        'op.execute("DO $$ BEGIN EXECUTE $sql$SELECT id INTO billing_records FROM billing_tax_orders$sql$; END $$")',
     ],
 )
 def test_tax_validation_read_exception_never_permits_platform_writes(
@@ -194,7 +196,16 @@ def test_tax_validation_read_exception_never_permits_platform_writes(
     )
 
 
-def test_exceptional_billing_read_can_share_literal_with_owned_ddl(tmp_path):
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id FROM billing_records FOR UPDATE; CREATE INDEX planted ON billing_tax_orders (revision_id)",
+        "CREATE FUNCTION planted() RETURNS void LANGUAGE plpgsql AS $$ DECLARE local_id uuid; BEGIN SELECT id INTO local_id FROM billing_records FOR UPDATE; END $$",
+        "CREATE FUNCTION planted() RETURNS void AS $body$ DECLARE local_id uuid; BEGIN SELECT id INTO STRICT local_id FROM billing_records; END $body$ LANGUAGE plpgsql",
+        "DO $$ DECLARE local_id uuid; BEGIN SELECT id INTO local_id FROM billing_records; END $$",
+    ],
+)
+def test_exceptional_billing_read_can_share_literal_with_owned_ddl(tmp_path, sql):
     shutil.copytree(ROOT / checker.DB, tmp_path / checker.DB)
     (tmp_path / "scripts").mkdir()
     shutil.copyfile(
@@ -207,6 +218,6 @@ def test_exceptional_billing_read_can_share_literal_with_owned_ddl(tmp_path):
     )
     path.write_text(
         path.read_text()
-        + '\nop.execute("SELECT id FROM billing_records FOR UPDATE; CREATE INDEX planted ON billing_tax_orders (revision_id)")\n'
+        + f"\nop.execute({sql!r})\n"
     )
     assert checker.check(tmp_path) == []
