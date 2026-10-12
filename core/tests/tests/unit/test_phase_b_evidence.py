@@ -1,7 +1,10 @@
 """Incomplete or mixed-revision declarations must never pass the exit gate."""
 
 import importlib.util
+import json
+import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -66,6 +69,7 @@ def bundle():
 
 
 def check(bundle, **changes):
+    changes.setdefault("now", datetime(2026, 10, 12, 12, tzinfo=UTC))
     return checker.check_evidence(
         bundle, source_revision=REVISION, exceptions=[], **changes
     )
@@ -120,6 +124,7 @@ def test_consecutive_distinct_smokes_not_total_success_count(bundle):
     bundle["gateway_runs"] = [record("older-failure", 1, passed=False)] + [
         record(f"ok-{i}", i) for i in (2, 3, 4)
     ]
+    bundle["enrollment"]["enrolled_at"] = "2026-10-12T00:00:00+00:00"
     assert check(bundle) == []
     bundle["gateway_runs"][2]["id"] = bundle["gateway_runs"][1]["id"]
     assert check(bundle)
@@ -167,3 +172,110 @@ def test_no_lease_and_version_evidence_cannot_be_inferred(bundle):
     assert any("no lease" in error for error in errors)
     assert any("throughput_map_version" in error for error in errors)
     assert any("#381" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://:secret@example.org/evidence",
+        "https://user@example.org/evidence",
+        "https://user:secret@example.org/evidence",
+        "https://@example.org/evidence",
+    ],
+)
+def test_evidence_url_rejects_all_userinfo(bundle, url):
+    bundle["receipt"]["url"] = url
+    assert any("without credentials" in error for error in check(bundle))
+
+
+def test_enrollment_must_strictly_precede_first_smoke(bundle):
+    bundle["enrollment"]["enrolled_at"] = bundle["gateway_runs"][0]["recorded_at"]
+    assert any("precede" in error for error in check(bundle))
+
+
+def test_coherent_future_bundle_is_rejected(bundle):
+    for value in bundle.values():
+        records = value if isinstance(value, list) else [value]
+        for row in records:
+            if isinstance(row, dict):
+                for key in ("recorded_at", "enrolled_at"):
+                    if key in row:
+                        row[key] = (
+                            datetime.fromisoformat(row[key]) + timedelta(days=1)
+                        ).isoformat()
+    assert any("in the future" in error for error in check(bundle))
+
+
+def test_future_clock_skew_is_bounded(bundle):
+    now = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    bundle["receipt"]["recorded_at"] = (now + checker.CLOCK_SKEW).isoformat()
+    assert check(bundle, now=now) == []
+    bundle["receipt"]["recorded_at"] = (
+        now + checker.CLOCK_SKEW + timedelta(seconds=1)
+    ).isoformat()
+    assert any("in the future" in error for error in check(bundle, now=now))
+
+
+@pytest.fixture
+def source_repo(tmp_path):
+    root = tmp_path / "checkout"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.org")
+    git("config", "user.name", "Evidence test")
+    (root / "scripts").mkdir()
+    (root / "scripts/ownership.json").write_text(
+        json.dumps(
+            {
+                "tables": {},
+                "non_orm_tables": {},
+                "model_sources": {},
+                "owners": {},
+                "exceptions": [
+                    {
+                        "name": "INV-AUTH-HOST-BINDING",
+                        "issue": "https://github.com/FyberLabs/panopticon/issues/299",
+                    }
+                ],
+            }
+        )
+    )
+    git("add", ".")
+    git("commit", "-qm", "initial")
+    return root, git
+
+
+@pytest.mark.parametrize("kind", ["modified", "staged", "untracked"])
+def test_dirty_checkout_cannot_be_identified_as_clean_head(source_repo, kind):
+    root, git = source_repo
+    assert checker.source_revision(root) == git("rev-parse", "HEAD")
+    if kind == "untracked":
+        (root / "planted.py").write_text("pass\n")
+    else:
+        (root / "scripts/ownership.json").write_text("{}")
+        if kind == "staged":
+            git("add", ".")
+    with pytest.raises(ValueError, match="dirty"):
+        checker.source_revision(root)
+
+
+def test_cli_rejects_uncommitted_exception_url_bypass(
+    source_repo, tmp_path, bundle, monkeypatch, capsys
+):
+    root, git = source_repo
+    evidence = tmp_path / "bundle.json"
+    evidence.write_text(json.dumps(bundle).replace(REVISION, git("rev-parse", "HEAD")))
+    monkeypatch.setattr(checker, "ROOT", root)
+    monkeypatch.setattr(sys, "argv", ["check_phase_b_evidence.py", str(evidence)])
+    assert checker.main() == 1
+    assert "#299" in capsys.readouterr().out
+    path = root / "scripts/ownership.json"
+    path.write_text(path.read_text().replace("/299", "/999"))
+    with pytest.raises(SystemExit) as error:
+        checker.main()
+    assert error.value.code == 2
+    assert "dirty" in capsys.readouterr().err
