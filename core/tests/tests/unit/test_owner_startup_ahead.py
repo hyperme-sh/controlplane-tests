@@ -40,6 +40,20 @@ class _Inspector:
         return list(self._tables)
 
 
+@pytest.fixture(autouse=True)
+def _startup_logger_enabled():
+    # Alembic's fileConfig (legacy migrations earlier in the workspace run)
+    # disables loggers it does not name, which would hide the startup warning.
+    log = logging.getLogger(startup.__name__)
+    log.disabled = False
+    log.propagate = True
+
+
+def _owned_tables():
+    registry = migrations._registry(migrations._ROOT)
+    return sorted({table for entry in registry['chains'].values() for table in entry['tables']})
+
+
 def _install_database(monkeypatch, versions, tables=()):
     monkeypatch.setattr(migrations, '_engine', lambda url: _Engine())
     monkeypatch.setattr(migrations, '_versions', lambda connection, root: dict(versions))
@@ -82,7 +96,7 @@ def test_unknown_revision_ahead_of_image_warns_and_skips(monkeypatch, caplog):
     versions['hypermesh'] = future
     versions['platform'] = 'platform_0053_baseline'
     upgraded = _record_upgrades(monkeypatch)
-    _install_database(monkeypatch, versions)
+    _install_database(monkeypatch, versions, tables=_owned_tables())
 
     with caplog.at_level(logging.WARNING):
         startup._owners('postgresql://example')
@@ -98,6 +112,70 @@ def test_unknown_revision_ahead_of_image_warns_and_skips(monkeypatch, caplog):
         'skipping hypermesh upgrade: database revision '
         f'{future} is not in this image (image head {heads["hypermesh"]})'
     ]
+
+
+def test_unknown_revision_sharing_the_head_number_is_a_later_revision(monkeypatch, caplog):
+    heads = migrations.chain_heads()
+    number = heads['hypermesh'].split('_')[1]
+    sibling = f'hypermesh_{number}_later_sibling'
+    versions = dict(heads)
+    versions['hypermesh'] = sibling
+    upgraded = _record_upgrades(monkeypatch)
+    _install_database(monkeypatch, versions, tables=_owned_tables())
+
+    with caplog.at_level(logging.WARNING):
+        startup._owners('postgresql://example')
+
+    assert 'alembic_version_hypermesh' not in upgraded
+    assert [r.getMessage() for r in caplog.records if r.name == 'controlplane_db.startup'] == [
+        f'skipping hypermesh upgrade: database revision {sibling} is not in this image '
+        f'(image head {heads["hypermesh"]})'
+    ]
+
+
+@pytest.mark.parametrize(
+    'revision',
+    [
+        'hypermesh_9999',  # not a chain revision id
+        'hypermesh_64_short_number',
+        'Hypermesh_9999_Typo',  # wrong case
+        'platform_9999_other_chain',  # another chain's id
+        'hypermesh_0001_older_than_the_image',  # unknown and older than the head
+        'hypermesh_99999_extra_digit',
+        '9999_hypermesh_reordered',
+        'hypermesh_9999_ok\n',  # trailing newline
+    ],
+)
+def test_unknown_revision_not_proven_newer_fails_closed(monkeypatch, caplog, revision):
+    versions = dict(migrations.chain_heads())
+    versions['hypermesh'] = revision
+    upgraded = _record_upgrades(monkeypatch)
+    _install_database(monkeypatch, versions, tables=_owned_tables())
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        ValueError, match='not in this image and is not a later revision of this chain'
+    ):
+        startup._owners('postgresql://example')
+
+    assert 'alembic_version_hypermesh' not in upgraded
+    assert not [r for r in caplog.records if r.name == 'controlplane_db.startup']
+
+
+def test_unknown_revision_with_missing_owned_tables_fails_closed(monkeypatch, caplog):
+    heads = migrations.chain_heads()
+    versions = dict(heads)
+    versions['hypermesh'] = 'hypermesh_9999_not_in_this_image'
+    registry = migrations._registry(migrations._ROOT)
+    absent = registry['chains']['hypermesh']['tables'][0]
+    tables = [table for table in _owned_tables() if table != absent]
+    upgraded = _record_upgrades(monkeypatch)
+    _install_database(monkeypatch, versions, tables=tables)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match=absent):
+        startup._owners('postgresql://example')
+
+    assert 'alembic_version_hypermesh' not in upgraded
+    assert not [r for r in caplog.records if r.name == 'controlplane_db.startup']
 
 
 def test_unrelated_alembic_error_still_raises(monkeypatch, caplog):
