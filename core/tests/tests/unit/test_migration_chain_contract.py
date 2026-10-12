@@ -54,13 +54,32 @@ def test_new_revision_in_wrong_owner_chain_fails(tmp_path):
     (tmp_path/'scripts').mkdir()
     shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
     path = tmp_path/checker.DB/'migration_chains/platform/versions/0054_planted.py'
-    path.write_text('''revision = "0054_planted"
+    path.write_text('''revision = "platform_0099_planted"
 down_revision = "platform_0054_subject_scope"
 def upgrade():
     op.add_column("hypermesh_leases", column)
 ''')
     assert any('hypermesh_leases: migration belongs to hypermesh' in error for error in checker.check(tmp_path))
     path.write_text(path.read_text().replace('hypermesh_leases', 'users'))
+    assert checker.check(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["0054_planted", "platform_planted_0054", "hypermesh_0054_planted", "platform_0054", "platform_0054_Planted"],
+)
+def test_owner_revision_must_use_the_chain_id_format(tmp_path, revision):
+    shutil.copytree(ROOT/checker.DB, tmp_path/checker.DB)
+    (tmp_path/'scripts').mkdir()
+    shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
+    path = tmp_path/checker.DB/'migration_chains/platform/versions/0099_planted.py'
+    path.write_text(f'''revision = "{revision}"
+down_revision = "platform_0054_subject_scope"
+def upgrade():
+    pass
+''')
+    assert any('revision must be one literal <chain>_<NNNN>_<slug> id' in error for error in checker.check(tmp_path))
+    path.write_text(path.read_text().replace(f'revision = "{revision}"', 'revision = "platform_0099_planted"'))
     assert checker.check(tmp_path) == []
 
 
@@ -107,7 +126,7 @@ def test_drop_operations_cannot_cross_owner_chains(tmp_path, operation):
     )
     path = tmp_path / checker.DB / "migration_chains/platform/versions/0054_planted.py"
     source = (
-        'revision = "0054_planted"\ndown_revision = "platform_0054_subject_scope"\ndef upgrade():\n    '
+        'revision = "platform_0099_planted"\ndown_revision = "platform_0054_subject_scope"\ndef upgrade():\n    '
         + operation
         + "\n"
     )
