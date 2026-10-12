@@ -148,3 +148,20 @@ def test_baseline_inventory_cannot_omit_frozen_tables(tmp_path):
     manifest["chains"]["platform"]["baseline_tables"] = []
     path.write_text(json.dumps(manifest))
     assert "platform: baseline inventory differs from frozen SQL" in checker.check(tmp_path)
+
+
+@pytest.mark.parametrize('operation', [
+    'op.execute("UPDATE public.billing_records SET amount=0")',
+    'op.execute("UPDATE public . billing_records SET amount=0")',
+    'op.execute(\'DELETE FROM "public"."billing_records"\')',
+    'op.execute("ALTER TABLE billing_records ADD COLUMN planted integer")',
+    'op.execute("TRUNCATE billing_tax_orders, billing_records")',
+    'op.drop_table("billing_records")',
+])
+def test_tax_validation_read_exception_never_permits_platform_writes(tmp_path, operation):
+    shutil.copytree(ROOT/checker.DB, tmp_path/checker.DB)
+    (tmp_path/'scripts').mkdir()
+    shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
+    path=tmp_path/checker.DB/'migration_chains/payment_service/versions/0063_tax_calculations.py'
+    path.write_text(path.read_text()+'\n'+operation+'\n')
+    assert any('billing_records: migration belongs to platform' in error for error in checker.check(tmp_path))
