@@ -38,7 +38,12 @@ def test_startup_boots_when_database_is_ahead_of_the_image(migration_database, t
     monkeypatch.setattr(migrations, '_ROOT', root)
     monkeypatch.setenv('DATABASE_URL', url)
     monkeypatch.setenv('CONTROLPLANE_MIGRATION_MODE', 'owners')
-    with caplog.at_level(logging.WARNING):
+    # Legacy Alembic fileConfig disables loggers that already exist. Re-enable
+    # this one so the warning is visible when those tests ran first.
+    startup_log = logging.getLogger('controlplane_db.startup')
+    startup_log.disabled = False
+    startup_log.propagate = True
+    with caplog.at_level(logging.WARNING, logger='controlplane_db.startup'):
         assert main() == 0
         assert tenancy_startup.main() == 0
 
