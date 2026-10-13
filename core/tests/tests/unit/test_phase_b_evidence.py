@@ -188,6 +188,34 @@ def test_evidence_url_rejects_all_userinfo(bundle, url):
     assert any("without credentials" in error for error in check(bundle))
 
 
+@pytest.mark.parametrize("port", ["not-a-port", "65536", "-1"])
+def test_evidence_url_rejects_invalid_ports(bundle, port):
+    bundle["receipt"]["url"] = f"https://example.org:{port}/evidence"
+    assert any("HTTPS evidence link" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("port", ["", ":443", ":8443"])
+def test_evidence_url_accepts_valid_ports(bundle, port):
+    bundle["receipt"]["url"] = f"https://example.org{port}/evidence"
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize("identity", [" gateway-2", "gateway-2 ", " gateway-2 "])
+def test_evidence_ids_are_unique_after_trimming_across_groups(bundle, identity):
+    bundle["stripe_runs"][0]["id"] = identity
+    assert any("distinct nonempty" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("hour", [0, 1, 2])
+def test_enrollment_record_cannot_precede_enrollment(bundle, hour):
+    bundle["enrollment"]["recorded_at"] = f"2026-10-12T{hour:02}:00:00+00:00"
+    errors = check(bundle)
+    if hour == 0:
+        assert any("recorded_at must not precede enrolled_at" in e for e in errors)
+    else:
+        assert errors == []
+
+
 def test_enrollment_must_strictly_precede_first_smoke(bundle):
     bundle["enrollment"]["enrolled_at"] = bundle["gateway_runs"][0]["recorded_at"]
     assert any("precede" in error for error in check(bundle))
