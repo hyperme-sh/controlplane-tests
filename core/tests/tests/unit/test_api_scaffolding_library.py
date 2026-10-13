@@ -28,6 +28,8 @@ from fastapi.testclient import TestClient
 from controlplane_api.config import settings
 from controlplane_identity.configuration import settings as identity_settings
 from controlplane_api import metrics
+from controlplane_events.store import delivery_counts_sync
+from sqlalchemy import create_engine, text
 from controlplane_api.health import router as health
 from controlplane_api.version import router as version
 from controlplane_api.operator.plugins import plugin_registry
@@ -43,6 +45,11 @@ with TestClient(app) as client:
     assert client.get('/api/v1/health/').json() == {'status': 'Ok'}
     assert client.get('/version').json() == {'service': 'api-wheel-test', 'git_sha': 'unknown', 'built_at': 'unknown'}
 assert metrics.HTTP_REQUESTS is not None
+engine = create_engine('sqlite://')
+with engine.connect() as connection:
+    connection.execute(text('CREATE TABLE controlplane_event_deliveries (status TEXT)'))
+    assert delivery_counts_sync(connection) == (0, 0)
+engine.dispose()
 assert [row['id'] for row in plugin_registry()] == ['hypermesh.aiuditor', 'hypermesh.models', 'hypermesh.hosts', 'hypermesh.aimmune', 'tennessee-windage']
 """, {"SERVICE_NAME": "api-wheel-test", "GIT_SHA": "", "SOURCE_SHA": "", "HYPERMESH_SOURCE_SHA": "",
        "BUILT_AT": "", "PANOPTICON_IMAGE_DIGEST": "", "IMAGE_DIGEST": "", "CPEDGE_HYPERMESH_SERVICE_URL": ""})
