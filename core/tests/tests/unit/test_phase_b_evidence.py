@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ spec = importlib.util.spec_from_file_location(
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 REVISION = "a" * 40
+COMMIT_TIME = datetime(2026, 10, 12, tzinfo=UTC)
 
 
 def record(name, hour=1, **fields):
@@ -69,6 +71,7 @@ def bundle():
 
 
 def check(bundle, **changes):
+    changes.setdefault("commit_time", COMMIT_TIME)
     changes.setdefault("now", datetime(2026, 10, 12, 12, tzinfo=UTC))
     return checker.check_evidence(
         bundle, source_revision=REVISION, exceptions=[], **changes
@@ -80,10 +83,15 @@ def test_complete_declarations_pass_but_existing_exceptions_do_not(bundle):
     assert any(
         "#299" in error
         for error in checker.check_evidence(
-            bundle, source_revision=REVISION, exceptions=["INV-AUTH-HOST-BINDING"]
+            bundle,
+            source_revision=REVISION,
+            commit_time=COMMIT_TIME,
+            exceptions=["INV-AUTH-HOST-BINDING"],
         )
     )
-    assert checker.check_evidence(bundle, source_revision="b" * 40, exceptions=[])
+    assert checker.check_evidence(
+        bundle, source_revision="b" * 40, commit_time=COMMIT_TIME, exceptions=[]
+    )
 
 
 @pytest.mark.parametrize(
@@ -250,7 +258,16 @@ def source_repo(tmp_path):
     root.mkdir()
 
     def git(*args):
-        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+        return subprocess.check_output(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            env=os.environ
+            | {
+                "GIT_AUTHOR_DATE": COMMIT_TIME.isoformat(),
+                "GIT_COMMITTER_DATE": COMMIT_TIME.isoformat(),
+            },
+        ).strip()
 
     git("init", "-q")
     git("config", "user.email", "test@example.org")
@@ -275,6 +292,62 @@ def source_repo(tmp_path):
     git("add", ".")
     git("commit", "-qm", "initial")
     return root, git
+
+
+@pytest.mark.parametrize(
+    "host", ["exa mple.org", "%zz", "-bad.org", "bad_.org", "a..org"]
+)
+def test_evidence_url_rejects_invalid_hosts(bundle, host):
+    bundle["receipt"]["url"] = f"https://{host}/evidence"
+    assert any("HTTPS evidence link" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("host", ["example.org", "127.0.0.1", "[::1]", "münchen.de"])
+def test_evidence_url_accepts_dns_idna_and_ip_hosts(bundle, host):
+    bundle["receipt"]["url"] = f"https://{host}/evidence"
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize("key", ["failed_deposit", "repeated_mismatch"])
+@pytest.mark.parametrize("hour", [9, 10])
+def test_credit_retirement_follows_refusal_exercises(bundle, key, hour):
+    bundle[key]["recorded_at"] = f"2026-10-12T{hour:02}:00:00+00:00"
+    assert any("removed after" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key", ["receipt", "refund_recovery", "enrollment", "gateway_runs", "stripe_runs"]
+)
+def test_records_cannot_predate_source_commit(bundle, key):
+    value = bundle[key]
+    row = value[0] if isinstance(value, list) else value
+    row["recorded_at"] = "2026-10-11T23:59:59+00:00"
+    assert any("predates the source commit" in e for e in check(bundle))
+
+
+def test_enrollment_cannot_predate_source_commit(bundle):
+    bundle["enrollment"]["enrolled_at"] = "2026-10-11T23:59:59+00:00"
+    assert any("enrolled_at predates" in e for e in check(bundle))
+
+
+def test_source_commit_time_uses_actual_git_commit(source_repo):
+    root, git = source_repo
+    assert checker.source_commit_time(root, git("rev-parse", "HEAD")) == COMMIT_TIME
+
+
+@pytest.mark.parametrize(
+    "pair", ['"passed":false,"passed":true', '"passed":true,"passed":true']
+)
+def test_cli_rejects_duplicate_properties_before_source_checks(
+    tmp_path, monkeypatch, capsys, pair
+):
+    evidence = tmp_path / "duplicate.json"
+    evidence.write_text('{"receipt":{' + pair + "}}")
+    monkeypatch.setattr(sys, "argv", ["checker", str(evidence)])
+    with pytest.raises(SystemExit) as error:
+        checker.main()
+    assert error.value.code == 2
+    assert "duplicate JSON property" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("kind", ["modified", "staged", "untracked"])
