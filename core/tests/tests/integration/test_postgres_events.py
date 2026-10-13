@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from controlplane_events.envelope import ControlPlaneEventEnvelope
 from controlplane_events.publisher import PostgresEventPublisher
 from controlplane_events.routing_consumer import RoutingControlPlaneConsumer
-from controlplane_events.store import normalize_async_url
+from controlplane_events.store import delivery_counts_sync, normalize_async_url
 
 pytestmark = pytest.mark.integration
 
@@ -1025,3 +1025,28 @@ def test_temp_shadow_tables_do_not_capture_definer_writes(migrated_postgres: str
         assert status == "pending"
     finally:
         eng.dispose()
+
+
+def test_delivery_counts_are_read_only_and_transaction_scoped(migrated_postgres: str) -> None:
+    engine = create_engine(migrated_postgres)
+    try:
+        with engine.connect() as connection:
+            before = delivery_counts_sync(connection)
+            group = "counts-" + uuid.uuid4().hex
+            for status in ("pending", "pending", "claimed", "dead", "delivered"):
+                event_id = connection.execute(
+                    text("INSERT INTO controlplane_events (event_type, envelope) "
+                         "VALUES ('test.counts.v1', '{}'::jsonb) RETURNING id")
+                ).scalar_one()
+                connection.execute(
+                    text("INSERT INTO controlplane_event_deliveries "
+                         "(event_id, consumer_group, status) VALUES (:event, :group, :status)"),
+                    {"event": event_id, "group": group, "status": status},
+                )
+            assert delivery_counts_sync(connection) == (before[0] + 3, before[1] + 1)
+            # Reading twice neither consumes nor changes the delivery rows.
+            assert delivery_counts_sync(connection) == (before[0] + 3, before[1] + 1)
+            connection.rollback()
+            assert delivery_counts_sync(connection) == before
+    finally:
+        engine.dispose()
