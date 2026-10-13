@@ -886,3 +886,65 @@ def test_member_copied_after_the_sync_is_built_by_an_unlocked_run(tmp_path):
     write(root, "svc/Dockerfile", fixed)
     errors = checker.violations(root)
     assert not any("ticket-lib" in error for error in errors)
+
+
+def test_overlay_command_runs_with_the_base_entrypoint(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    entrypoint: ["uv"]', '    command: ["/app/.venv/bin/python", "-m", "svc_service.app"]'])
+    assert checker.violations(root) == []
+    write(
+        root,
+        "docker-compose.vm.yaml",
+        'services:\n  worker:\n    command: ["run", "python", "-m", "svc_service.app"]\n',
+    )
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+
+
+def test_inline_comments_in_a_command_list_are_ignored(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(
+        root,
+        ["    command:", "      - uv # project runner", "      - run", "      - python", "      - '#not-a-comment'"],
+    )
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+    assert checker._strip_comment("'a # b' # c") == "'a # b'"
+
+
+def test_only_executable_compose_fields_count(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(
+        root,
+        [
+            "    environment:",
+            '      HELP_TEXT: "uv run python"',
+            "    labels:",
+            '      note: "uv run python -m svc_service.app"',
+            '    command: ["/app/.venv/bin/python", "-m", "svc_service.app"]',
+        ],
+    )
+    assert checker.violations(root) == []
+
+
+def test_shell_form_command_with_uv_run_is_checked(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    command: ["sh", "-c", "uv run python -m svc_service.app"]'])
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+
+
+def test_runtime_members_come_from_the_final_stage():
+    text = "\n".join(
+        [
+            "FROM base AS builder",
+            "COPY lib ./lib",
+            "COPY svc ./svc",
+            "FROM base",
+            "COPY svc ./svc",
+            "",
+        ]
+    )
+    assert checker.final_stage_copies(text) == {"svc"}
+    carried = text + "COPY --from=builder /app /app\n"
+    assert checker.final_stage_copies(carried) == {"lib", "svc"}
