@@ -25,3 +25,25 @@ except UnstablePayerIdentity:
 else:
     raise AssertionError('invalid key accepted')
 """)
+
+
+def test_platform_budget_store_wheel_has_no_service_dependency():
+    wheel_run("controlplane-db", """
+import importlib.util, uuid
+from datetime import datetime, timezone
+from dataclasses import FrozenInstanceError
+from controlplane_db.budget_store import AgentBudget, try_allocate, burn_legacy_budget_allocation
+assert importlib.util.find_spec('payment_service') is None
+assert importlib.util.find_spec('api') is None
+stamp = datetime.now(timezone.utc)
+budget = AgentBudget(uuid.uuid4(), uuid.uuid4(), None, None, 'owner', 'mint', 100, 0, stamp, stamp)
+assert not hasattr(budget, '_sa_instance_state')
+try:
+    budget.allocated_lamports = 1
+except FrozenInstanceError:
+    pass
+else:
+    raise AssertionError('mutable budget view')
+assert try_allocate(None, budget.tenant_id, budget.id, 0) is None
+burn_legacy_budget_allocation(None, budget.tenant_id, budget_id=budget.id, user_id=None, atoms=0)
+""")
