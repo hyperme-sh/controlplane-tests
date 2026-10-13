@@ -81,3 +81,13 @@ def test_edge_and_hypermesh_select_only_affected_suites():
     assert result.stdout.splitlines() == ["controlplane-edge", "products/hypermesh",
                                          "products/hypermesh-gateway", "products/hypermesh-ticket", "products/hypermesh-orchestrator"]
     assert selection("controlplane-edge/src/controlplane_edge/edge_proxy.py") == (True, ["controlplane-edge"])
+
+
+@pytest.mark.parametrize("path", [
+    "products/hypermesh/contracts/src/host_binding_store/__init__.py",
+    "products/hypermesh/contracts/pyproject.toml",
+    "products/hypermesh/contracts/AGENTS.md",
+])
+def test_host_binding_contract_changes_run_owning_and_consumer_suites(path):
+    enabled, selectors = selection(path)
+    assert enabled and selectors == []  # All suites include shared owner tests and auth enrollment.
