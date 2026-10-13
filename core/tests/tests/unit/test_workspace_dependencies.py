@@ -295,9 +295,153 @@ def test_unlocked_uv_run_requires_sources_of_copied_members(tmp_path):
     )
     errors = checker.violations(root)
     assert any("ticket-lib" in error and "product/ticket" in error for error in errors)
-    frozen = (root / "docker-compose.yaml").read_text().replace(
+    # `--no-sync` after the child command is the child's argument. uv still syncs.
+    child_flag = (root / "docker-compose.yaml").read_text().replace(
+        "      - svc_service.app\n",
+        "      - svc_service.app\n      - --no-sync\n",
+    )
+    (root / "docker-compose.yaml").write_text(child_flag)
+    assert any("ticket-lib" in error for error in checker.violations(root))
+    frozen = child_flag.replace(
         "      - uv\n      - run\n",
         "      - uv\n      - run\n      - --frozen\n",
     )
     (root / "docker-compose.yaml").write_text(frozen)
     assert checker.violations(root) == []
+
+
+def _product_with_dev_group(tmp_path):
+    root = workspace(tmp_path, svc_source="import models_pkg\n")
+    write(
+        root,
+        "pyproject.toml",
+        "\n".join(
+            [
+                "[tool.uv.workspace]",
+                "members = [",
+                '    "libs/models",',
+                '    "libs/extra",',
+                '    "svc",',
+                '    "product",',
+                '    "product/ticket",',
+                '    "product/devlib",',
+                "]",
+                "",
+            ]
+        ),
+    )
+    write(
+        root,
+        "product/pyproject.toml",
+        "\n".join(
+            [
+                "[project]",
+                'name = "product-service"',
+                'version = "0"',
+                'dependencies = ["ticket-lib"]',
+                "",
+                "[dependency-groups]",
+                'dev = ["dev-lib"]',
+                "",
+                "[tool.uv.sources]",
+                "ticket-lib = { workspace = true }",
+                "dev-lib = { workspace = true }",
+                "",
+            ]
+        ),
+    )
+    write(root, "product/ticket/pyproject.toml", package("ticket-lib"))
+    write(root, "product/ticket/src/ticket_pkg/__init__.py", "")
+    write(root, "product/devlib/pyproject.toml", package("dev-lib"))
+    write(root, "product/devlib/src/dev_pkg/__init__.py", "")
+    dockerfile = DOCKERFILE.replace(
+        "COPY libs/models ./libs/models\n",
+        "COPY libs/models ./libs/models\n"
+        "COPY product/pyproject.toml ./product/pyproject.toml\n",
+    )
+    write(root, "svc/Dockerfile", dockerfile)
+    return root
+
+
+def test_unlocked_uv_run_includes_dev_group_sources(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                "    command:",
+                "      - uv",
+                "      - run",
+                "      - python",
+                "      - -m",
+                "      - svc_service.app",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "product/devlib" in error for error in errors)
+    assert any("ticket-lib" in error for error in errors)
+    no_dev = (root / "docker-compose.yaml").read_text().replace(
+        "      - uv\n      - run\n",
+        "      - uv\n      - run\n      - --no-dev\n",
+    )
+    (root / "docker-compose.yaml").write_text(no_dev)
+    errors = checker.violations(root)
+    assert any("ticket-lib" in error for error in errors)
+    assert not any("dev-lib" in error for error in errors)
+
+
+def test_overlay_image_without_a_dockerfile_is_still_checked(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  svc-service:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                "    command:",
+                "      - /app/.venv/bin/python",
+                "      - -m",
+                "      - svc_service.app",
+                "",
+            ]
+        ),
+    )
+    write(
+        root,
+        "docker-compose.vm.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  enroll:",
+                "    image: ghcr.io/fyberlabs/svc-service:${PANOPTICON_IMAGE_TAG:-test}",
+                '    entrypoint: ["uv", "run", "--project", "/app/svc", "python", "-m", "svc_service.app"]',
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+    locked = (root / "docker-compose.vm.yaml").read_text().replace(
+        '["uv", "run", "--project", "/app/svc", "python"',
+        '["uv", "run", "--no-sync", "--project", "/app/svc", "python"',
+    )
+    (root / "docker-compose.vm.yaml").write_text(locked)
+    assert checker.violations(root) == []
+
+
+def test_known_host_enroll_uses_the_image_venv():
+    text = (ROOT / "docker-compose.vm.yaml").read_text()
+    enroll = text.split("hypermesh-known-host-enroll:", 1)[1].split("\n  hypermesh-gateway:", 1)[0]
+    assert "/app/.venv/bin/python" in enroll
+    assert "hypermesh_service.lease_harness" in enroll
+    assert "uv" not in enroll
