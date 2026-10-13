@@ -207,3 +207,97 @@ def test_entrypoint_image_must_import_the_app_module(tmp_path):
 def test_edge_image_imports_the_api_app():
     text = (ROOT / "controlplane-edge/Dockerfile").read_text()
     assert 'RUN /app/.venv/bin/python -c "import api"' in text
+
+
+def test_operator_ban_store_is_a_workspace_member():
+    root = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert "core/user-service/contracts" in root["tool"]["uv"]["workspace"]["members"]
+    project = tomllib.loads((ROOT / "core/user-service/contracts/pyproject.toml").read_text())
+    assert project["project"]["name"] == "operator-ban-store"
+
+
+def test_migrate_image_imports_alembic_after_the_sync():
+    text = (ROOT / "core/payment-service/Dockerfile").read_text()
+    assert 'RUN /app/.venv/bin/python -c "import controlplane_db"' in text
+    assert 'RUN /app/.venv/bin/python -c "import alembic"' in text
+    assert 'RUN /app/.venv/bin/python -c "import controlplane_tenancy.startup"' in text
+
+
+def test_unlocked_uv_run_requires_sources_of_copied_members(tmp_path):
+    """Copying a parent pyproject makes `uv run` build that member.
+
+    payment-service installs host-binding-store, the contract under
+    products/hypermesh. The parent pyproject declares hypermesh-ticket as
+    ``{workspace=true}``. An unlocked ``uv run`` builds the parent and fails
+    when the ticket package was not copied.
+    """
+
+    root = workspace(tmp_path, svc_source="import models_pkg\n")
+    write(
+        root,
+        "pyproject.toml",
+        "\n".join(
+            [
+                "[tool.uv.workspace]",
+                "members = [",
+                '    "libs/models",',
+                '    "libs/extra",',
+                '    "svc",',
+                '    "product",',
+                '    "product/ticket",',
+                "]",
+                "",
+            ]
+        ),
+    )
+    write(
+        root,
+        "product/pyproject.toml",
+        "\n".join(
+            [
+                "[project]",
+                'name = "product-service"',
+                'version = "0"',
+                'dependencies = ["ticket-lib"]',
+                "",
+                "[tool.uv.sources]",
+                "ticket-lib = { workspace = true }",
+                "",
+            ]
+        ),
+    )
+    write(root, "product/ticket/pyproject.toml", package("ticket-lib"))
+    write(root, "product/ticket/src/ticket_pkg/__init__.py", "")
+    dockerfile = DOCKERFILE.replace(
+        "COPY libs/models ./libs/models\n",
+        "COPY libs/models ./libs/models\n"
+        "COPY product/pyproject.toml ./product/pyproject.toml\n",
+    )
+    write(root, "svc/Dockerfile", dockerfile)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  migrate:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                "    command:",
+                "      - uv",
+                "      - run",
+                "      - python",
+                "      - -m",
+                "      - svc_service.app",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("ticket-lib" in error and "product/ticket" in error for error in errors)
+    frozen = (root / "docker-compose.yaml").read_text().replace(
+        "      - uv\n      - run\n",
+        "      - uv\n      - run\n      - --frozen\n",
+    )
+    (root / "docker-compose.yaml").write_text(frozen)
+    assert checker.violations(root) == []
