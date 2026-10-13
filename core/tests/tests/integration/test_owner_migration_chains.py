@@ -597,10 +597,8 @@ def assert_subject_scope_delta(before, after):
 
 
 def assert_journal_schema_delta(after):
-    sequence = after["sequences"].pop("usdc_deposit_addresses_hd_index_seq")
-    assert sequence["owned_by"] == [["usdc_deposit_addresses", "hd_index"]]
-    assert sequence["definition"][0][1:4] == [0, 1, 2147483647]
-    for table in ("usdc_ledger_postings", "usdc_ledger_entries", "usdc_deposit_addresses", "usdc_payment_intents", "usdc_chain_transfers", "usdc_outbound_transfers", "onramp_sessions", "connect_recipient_accounts", "payer_mismatch_accounts", "billing_tax_orders", "billing_tax_calculations"):
+    assert "usdc_deposit_addresses_hd_index_seq" not in after["sequences"]
+    for table in ("connect_recipient_accounts", "payer_mismatch_accounts", "billing_tax_orders", "billing_tax_calculations"):
         assert after["tables"].pop(table)["rls"] == [True, True]
-    for function in ("usdc_journal_immutable()", "usdc_posting_seal_only()", "usdc_entry_draft_only()", "usdc_posting_balanced()", "usdc_intent_progress_only()", "usdc_transfer_progress_only()", "usdc_outbound_progress_only()", "onramp_progress_only()", "connect_recipient_progress_only()", "connect_recipient_immutable()", "tax_history_retained()", "tax_order_binding()", "tax_calculation_progress()"):
+    for function in ("connect_recipient_progress_only()", "connect_recipient_immutable()", "tax_history_retained()", "tax_order_binding()", "tax_calculation_progress()"):
         assert after["functions"].pop(function)
