@@ -610,3 +610,141 @@ def test_dockerfile_path_is_resolved_from_the_build_context(tmp_path):
     )
     errors = checker.violations(root)
     assert any("svc/Dockerfile" in error and "dev-lib" in error for error in errors)
+
+
+def test_nested_compose_context_is_relative_to_the_compose_file(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "deploy/docker-compose.yml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      context: ..",
+                "      dockerfile: svc/Dockerfile",
+                "    command:",
+                "      - uv",
+                "      - run",
+                "      - python",
+                "      - -m",
+                "      - svc_service.app",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("svc/Dockerfile" in error and "dev-lib" in error for error in errors)
+
+
+def test_configured_default_groups_replace_dev(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    members = (root / "pyproject.toml").read_text().replace(
+        '    "product/devlib",',
+        '    "product/devlib",\n    "product/qalib",',
+    )
+    (root / "pyproject.toml").write_text(members)
+    project = (root / "product/pyproject.toml").read_text().replace(
+        'dev = ["dev-lib"]\n',
+        'dev = ["dev-lib"]\nqa = ["qa-lib"]\n',
+    )
+    project = project.replace(
+        "[tool.uv.sources]\n",
+        '[tool.uv]\ndefault-groups = ["qa"]\n\n[tool.uv.sources]\n',
+    )
+    project = project.replace(
+        "dev-lib = { workspace = true }\n",
+        "dev-lib = { workspace = true }\nqa-lib = { workspace = true }\n",
+    )
+    (root / "product/pyproject.toml").write_text(project)
+    write(root, "product/qalib/pyproject.toml", package("qa-lib"))
+    write(root, "product/qalib/src/qa_pkg/__init__.py", "")
+    _compose_uv(
+        root,
+        ["      - uv", "      - run", "      - python", "      - -m", "      - svc_service.app"],
+    )
+    errors = checker.violations(root)
+    assert any("qa-lib" in error for error in errors)
+    assert not any("dev-lib" in error for error in errors)
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --no-default-groups",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    errors = checker.violations(root)
+    assert not any("qa-lib" in error for error in errors)
+    assert any("ticket-lib" in error for error in errors)
+
+
+def test_include_group_is_part_of_the_closure(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    members = (root / "pyproject.toml").read_text().replace(
+        '    "product/devlib",',
+        '    "product/devlib",\n    "product/qalib",',
+    )
+    (root / "pyproject.toml").write_text(members)
+    project = (root / "product/pyproject.toml").read_text()
+    project = project.replace(
+        'dev = ["dev-lib"]\n',
+        'dev = [{include-group = "qa"}]\nqa = ["qa-lib", {include-group = "dev"}]\n',
+    )
+    project = project.replace(
+        "dev-lib = { workspace = true }\n",
+        "qa-lib = { workspace = true }\n",
+    )
+    (root / "product/pyproject.toml").write_text(project)
+    write(root, "product/qalib/pyproject.toml", package("qa-lib"))
+    write(root, "product/qalib/src/qa_pkg/__init__.py", "")
+    _compose_uv(
+        root,
+        ["      - uv", "      - run", "      - python", "      - -m", "      - svc_service.app"],
+    )
+    errors = checker.violations(root)
+    assert any("qa-lib" in error and "product/qalib" in error for error in errors)
+
+
+def test_no_project_does_not_expand_the_workspace(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --no-project",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    assert checker.violations(root) == []
+
+
+def test_package_option_requires_that_member_even_when_not_copied(tmp_path):
+    root = workspace(tmp_path, svc_source="import models_pkg\n")
+    text = (root / "pyproject.toml").read_text().replace(
+        'members = ["libs/models", "libs/extra", "svc"]',
+        'members = ["libs/models", "libs/extra", "svc", "product"]',
+    )
+    (root / "pyproject.toml").write_text(text)
+    write(root, "product/pyproject.toml", package("product-service"))
+    write(root, "product/src/product_pkg/__init__.py", "")
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --package",
+            "      - product-service",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    assert any("product-service" in error and "COPY product" in error for error in checker.violations(root))
