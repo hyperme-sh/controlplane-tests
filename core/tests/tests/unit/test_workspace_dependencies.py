@@ -748,3 +748,91 @@ def test_package_option_requires_that_member_even_when_not_copied(tmp_path):
         ],
     )
     assert any("product-service" in error and "COPY product" in error for error in checker.violations(root))
+
+
+def test_service_name_comes_from_a_multiline_block():
+    block = "  worker:\n    image: ghcr.io/fyberlabs/svc-service:test\n    command: [x]"
+    assert checker._service_name(block) == "worker"
+
+
+def test_repository_compose_services_have_names():
+    for path in checker.compose_files(ROOT):
+        for block in checker.compose_service_blocks(path.read_text()):
+            assert checker._service_name(block), (path, block.splitlines()[0])
+
+
+def test_image_only_overlay_maps_to_its_own_build_service(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(root, "other/pyproject.toml", "")
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  svc-service:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                "  zz-last:",
+                "    build:",
+                "      dockerfile: other/Dockerfile",
+                "",
+            ]
+        ),
+    )
+    write(
+        root,
+        "docker-compose.vm.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  svc-service:",
+                "    command: [uv, run, python, -m, svc_service.app]",
+                "",
+            ]
+        ),
+    )
+    groups, errors = checker.unlocked_compose_targets(root)
+    assert errors == []
+    assert set(groups) == {"svc/Dockerfile"}
+
+
+def test_alternate_compose_dockerfile_is_checked(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(root, "svc/Worker.Dockerfile", (root / "svc/Dockerfile").read_text())
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Worker.Dockerfile",
+                "    command: [uv, run, python, -m, svc_service.app]",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("svc/Worker.Dockerfile" in e and "dev-lib" in e for e in errors)
+
+
+def test_missing_compose_dockerfile_is_reported(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Gone.Dockerfile",
+                "    command: [uv, run, python, -m, svc_service.app]",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("svc/Gone.Dockerfile" in e and "not in the repository" in e for e in errors)
