@@ -456,6 +456,7 @@ def assert_cache_migration_delta(before, after):
     expected['tables']['hypermesh_leases']['columns'].extend([
         ['protection_policy_version', 'integer', True, '1', '', '', None],
         ['protection_requirements', 'jsonb', True, "'[]'::jsonb", '', '', None],
+        ['contract_until', 'timestamp with time zone', False, None, '', '', None],
     ])
     approvals = after['tables'].pop('hypermesh_protection_approvals')
     assert approvals['rls'] == [True, True]
