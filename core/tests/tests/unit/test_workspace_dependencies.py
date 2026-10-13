@@ -836,3 +836,53 @@ def test_missing_compose_dockerfile_is_reported(tmp_path):
     )
     errors = checker.violations(root)
     assert any("svc/Gone.Dockerfile" in e and "not in the repository" in e for e in errors)
+
+
+def _worker_compose(root, lines):
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(["services:", "  worker:", "    build:", "      dockerfile: svc/Dockerfile", *lines, ""]),
+    )
+
+
+def test_inline_entrypoint_and_command_form_one_uv_run(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    entrypoint: ["uv"]', '    command: ["run", "python", "-m", "svc_service.app"]'])
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+    _worker_compose(root, ['    entrypoint: ["uv"]', '    command: ["run", "--no-sync", "python", "-m", "svc_service.app"]'])
+    assert checker.violations(root) == []
+
+
+def test_block_entrypoint_and_string_command_form_one_uv_run(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ["    entrypoint:", "      - uv", "    command: run python -m svc_service.app"])
+    errors = checker.violations(root)
+    assert any("dev-lib" in error and "svc/Dockerfile" in error for error in errors)
+
+
+def test_member_copied_after_the_sync_is_built_by_an_unlocked_run(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    dockerfile = (root / "svc/Dockerfile").read_text().replace(
+        "COPY product/pyproject.toml ./product/pyproject.toml\n", ""
+    )
+    write(root, "svc/Dockerfile", dockerfile)
+    _worker_compose(root, ["    command: [uv, run, --no-dev, python, -m, svc_service.app]"])
+    assert checker.violations(root) == []
+    late = dockerfile.replace(
+        'RUN /app/.venv/bin/python -c "import svc_service.app"\n',
+        'RUN /app/.venv/bin/python -c "import svc_service.app"\n'
+        "COPY product/pyproject.toml ./product/pyproject.toml\n",
+    )
+    write(root, "svc/Dockerfile", late)
+    errors = checker.violations(root)
+    assert any("ticket-lib" in error and "product/ticket" in error for error in errors)
+    fixed = late.replace(
+        "COPY product/pyproject.toml ./product/pyproject.toml\n",
+        "COPY product/pyproject.toml ./product/pyproject.toml\n"
+        "COPY product/ticket ./product/ticket\n",
+    )
+    write(root, "svc/Dockerfile", fixed)
+    errors = checker.violations(root)
+    assert not any("ticket-lib" in error for error in errors)
