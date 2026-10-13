@@ -948,3 +948,70 @@ def test_runtime_members_come_from_the_final_stage():
     assert checker.final_stage_copies(text) == {"svc"}
     carried = text + "COPY --from=builder /app /app\n"
     assert checker.final_stage_copies(carried) == {"lib", "svc"}
+
+
+def test_unlocked_run_cannot_use_a_later_copy(tmp_path):
+    text = DOCKERFILE.replace('ENV PYTHONPATH', 'RUN uv run --all-packages --no-dev python -c "print(1)"\nCOPY libs/extra ./libs/extra\nENV PYTHONPATH')
+    root = workspace(tmp_path, dockerfile=text)
+    errors = checker.violations(root)
+    assert any("extra-lib" in error and "before this RUN" in error for error in errors)
+    fixed = text.replace('COPY libs/extra ./libs/extra\n', '')
+    fixed = fixed.replace('RUN uv run', 'COPY libs/extra ./libs/extra\nRUN uv run')
+    write(root, 'svc/Dockerfile', fixed)
+    assert checker.violations(root) == []
+
+
+def test_effective_overlay_replaces_obsolete_command(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    command: [uv, run, python, -m, svc_service.app]'])
+    assert checker.unlocked_compose_targets(root)[0]
+    write(root, 'docker-compose.vm.yaml', 'services:\n  worker:\n    command: [/app/.venv/bin/python, -m, svc_service.app]\n')
+    assert checker.unlocked_compose_targets(root) == ({}, [])
+    assert checker.violations(root) == []
+
+
+def test_all_groups_respects_explicit_removal(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    command: [uv, run, --all-groups, --group, dev, --no-group, dev, python]'])
+    errors = checker.violations(root)
+    assert any('ticket-lib' in error for error in errors)
+    assert not any('dev-lib' in error for error in errors)
+
+
+def test_all_packages_includes_members_not_copied(tmp_path):
+    root = workspace(tmp_path)
+    _worker_compose(root, ['    command: [uv, run, --all-packages, --no-dev, python]'])
+    assert any('extra-lib' in error for error in checker.violations(root))
+    text = (root / 'svc/Dockerfile').read_text() + '\nCOPY libs/extra ./libs/extra\n'
+    write(root, 'svc/Dockerfile', text)
+    assert checker.violations(root) == []
+
+
+def test_default_groups_all_and_no_default_groups(tmp_path):
+    root = workspace(tmp_path)
+    write(root, 'svc/pyproject.toml', package('svc-service', ['models-lib']) + '\n[dependency-groups]\ndev = []\nqa = ["extra-lib"]\n[tool.uv]\ndefault-groups = "all"\n')
+    _worker_compose(root, ['    command: [uv, run, python]'])
+    assert any('extra-lib' in error for error in checker.violations(root))
+    _worker_compose(root, ['    command: [uv, run, --no-group, qa, python]'])
+    assert checker.violations(root) == []
+    _worker_compose(root, ['    command: [uv, run, --no-default-groups, python]'])
+    assert checker.violations(root) == []
+
+
+def test_compose_literal_and_folded_command_scalars(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    for marker in ('|', '|-', '>', '>+'):
+        _worker_compose(root, [f'    command: {marker}', '      sh -c "uv run', '      python -m svc_service.app"'])
+        assert any('dev-lib' in error for error in checker.violations(root))
+        _worker_compose(root, [f'    command: {marker}', '      /app/.venv/bin/python', '      -m svc_service.app'])
+        assert checker.violations(root) == []
+
+
+def test_dockerfile_metadata_does_not_execute_uv(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    text = (root / 'svc/Dockerfile').read_text()
+    for instruction in ('ENV HELP="uv run python"', 'LABEL usage="uv run python"', '# RUN uv run python'):
+        write(root, 'svc/Dockerfile', text + '\n' + instruction + '\n')
+        assert checker.violations(root) == []
+    write(root, 'svc/Dockerfile', text + '\nCMD ["uv", "run", "python"]\n')
+    assert any('dev-lib' in error for error in checker.violations(root))
