@@ -7,6 +7,7 @@ def test_directory_owner_wheel_has_only_platform_dependencies():
 import importlib.util, uuid
 from dataclasses import FrozenInstanceError
 from controlplane_tenancy.directory import UserView, RoleView, UserCreateData, SqlMembershipRepository
+from controlplane_tenancy.tenant_registry import tenant_active, tenant_ids_page, tenant_ids_sync
 assert importlib.util.find_spec('user_service') is None
 assert importlib.util.find_spec('api') is None
 assert importlib.util.find_spec('fastapi') is None

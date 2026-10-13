@@ -23,7 +23,7 @@ async def directory(async_engine):
     maker = async_sessionmaker(async_engine, expire_on_commit=False)
     ta, tb, ra, rb = [uuid.uuid4() for _ in range(4)]
     async with maker() as session:
-        session.add_all([Tenant(id=ta, name=str(ta)), Tenant(id=tb, name=str(tb))])
+        session.add_all([Tenant(id=ta, name=str(ta), is_active=True), Tenant(id=tb, name=str(tb), is_active=True)])
         await session.flush()
         session.add_all([Role(id=ra, tenant_id=ta, name="admin", permissions=["invite"]),
                          Role(id=rb, tenant_id=tb, name="admin", permissions=[])])
@@ -213,3 +213,31 @@ async def test_corrupt_cross_tenant_join_rows_never_grant_directory_membership(d
         assert not await SqlMembershipRepository(session).exists(ta, b.id, ga.id)
         assert await get_tenant_role_group_ids(session, ta, user_id=a.id, role="host") == []
         await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_tenant_registry_pages_status_and_caller_lock(directory):
+    from sqlalchemy.exc import DBAPIError
+    from controlplane_tenancy.tenant_registry import tenant_active, tenant_ids_page, tenant_ids_sync
+    maker, ta, tb, _, _ = directory
+    async with maker() as owner, maker() as observer:
+        assert await tenant_active(owner, uuid.uuid4()) is None
+        assert await tenant_active(owner, ta, lock=True) is True
+        await observer.execute(text("SET LOCAL lock_timeout = '100ms'"))
+        with pytest.raises(DBAPIError):
+            await observer.execute(text("UPDATE tenants SET is_active = false WHERE id = :id"), {"id": ta})
+        await observer.rollback()
+        await owner.rollback()
+        await observer.execute(text("UPDATE tenants SET is_active = false WHERE id = :id"), {"id": ta})
+        await observer.commit()
+        assert await tenant_active(owner, ta) is False
+        ids = await owner.run_sync(tenant_ids_sync)
+        pages = []
+        after = None
+        while page := await tenant_ids_page(owner, after=after, limit=1):
+            pages.extend(page)
+            after = page[-1]
+        assert pages == sorted(ids)
+        assert ta in pages and tb in pages
+        with pytest.raises(ValueError):
+            await tenant_ids_page(owner, limit=0)
