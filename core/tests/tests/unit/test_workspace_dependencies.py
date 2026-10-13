@@ -445,3 +445,168 @@ def test_known_host_enroll_uses_the_image_venv():
     assert "/app/.venv/bin/python" in enroll
     assert "hypermesh_service.lease_harness" in enroll
     assert "uv" not in enroll
+
+
+def _product_with_extras(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    members = (root / "pyproject.toml").read_text().replace(
+        '    "product/devlib",',
+        '    "product/devlib",\n    "product/feature",\n    "product/other",',
+    )
+    (root / "pyproject.toml").write_text(members)
+    project = (root / "product/pyproject.toml").read_text()
+    project = project.replace(
+        'dependencies = ["ticket-lib"]\n',
+        "\n".join(
+            [
+                'dependencies = ["ticket-lib"]',
+                "",
+                "[project.optional-dependencies]",
+                'feature = ["feature-lib"]',
+                'other = ["other-lib"]',
+                "",
+            ]
+        ),
+    )
+    project = project.replace(
+        "dev-lib = { workspace = true }\n",
+        "\n".join(
+            [
+                "dev-lib = { workspace = true }",
+                "feature-lib = { workspace = true }",
+                "other-lib = { workspace = true }",
+                "",
+            ]
+        ),
+    )
+    (root / "product/pyproject.toml").write_text(project)
+    write(root, "product/feature/pyproject.toml", package("feature-lib"))
+    write(root, "product/feature/src/feature_pkg/__init__.py", "")
+    write(root, "product/other/pyproject.toml", package("other-lib"))
+    write(root, "product/other/src/other_pkg/__init__.py", "")
+    return root
+
+
+def _compose_uv(root, command_lines):
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                "    command:",
+                *command_lines,
+                "",
+            ]
+        ),
+    )
+
+
+def test_unlocked_uv_run_includes_selected_extras(tmp_path):
+    root = _product_with_extras(tmp_path)
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --extra",
+            "      - feature",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    errors = checker.violations(root)
+    assert any("feature-lib" in error and "product/feature" in error for error in errors)
+    assert not any("other-lib" in error for error in errors)
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --all-extras",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    errors = checker.violations(root)
+    assert any("feature-lib" in error for error in errors)
+    assert any("other-lib" in error for error in errors)
+    _compose_uv(
+        root,
+        [
+            "      - uv",
+            "      - run",
+            "      - --all-extras",
+            "      - --no-extra",
+            "      - feature",
+            "      - python",
+            "      - -m",
+            "      - svc_service.app",
+        ],
+    )
+    errors = checker.violations(root)
+    assert not any("feature-lib" in error for error in errors)
+    assert any("other-lib" in error for error in errors)
+
+
+def test_global_uv_options_still_detect_an_unlocked_run(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                '    entrypoint: ["uv", "--directory", "/app", "run", "python", "-m", "svc_service.app"]',
+                "",
+            ]
+        ),
+    )
+    assert any("dev-lib" in error for error in checker.violations(root))
+    (root / "docker-compose.yaml").write_text(
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      dockerfile: svc/Dockerfile",
+                '    entrypoint: ["uv", "-q", "run", "--frozen", "python", "-m", "svc_service.app"]',
+                "",
+            ]
+        )
+    )
+    assert checker.violations(root) == []
+
+
+def test_dockerfile_path_is_resolved_from_the_build_context(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(
+        root,
+        "docker-compose.yaml",
+        "\n".join(
+            [
+                "services:",
+                "  worker:",
+                "    build:",
+                "      context: svc",
+                "      dockerfile: Dockerfile",
+                "    command:",
+                "      - uv",
+                "      - run",
+                "      - python",
+                "      - -m",
+                "      - svc_service.app",
+                "",
+            ]
+        ),
+    )
+    errors = checker.violations(root)
+    assert any("svc/Dockerfile" in error and "dev-lib" in error for error in errors)
