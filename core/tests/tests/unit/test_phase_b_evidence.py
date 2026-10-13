@@ -364,8 +364,9 @@ def test_dirty_checkout_cannot_be_identified_as_clean_head(source_repo, kind):
         checker.source_revision(root)
 
 
+@pytest.mark.parametrize("flag", [None, "--assume-unchanged", "--skip-worktree"])
 def test_cli_rejects_uncommitted_exception_url_bypass(
-    source_repo, tmp_path, bundle, monkeypatch, capsys
+    source_repo, tmp_path, bundle, monkeypatch, capsys, flag
 ):
     root, git = source_repo
     evidence = tmp_path / "bundle.json"
@@ -375,8 +376,23 @@ def test_cli_rejects_uncommitted_exception_url_bypass(
     assert checker.main() == 1
     assert "#299" in capsys.readouterr().out
     path = root / "scripts/ownership.json"
+    if flag:
+        git("update-index", flag, "scripts/ownership.json")
     path.write_text(path.read_text().replace("/299", "/999"))
+    if flag:
+        assert git("status", "--porcelain", "--untracked-files=all") == ""
     with pytest.raises(SystemExit) as error:
         checker.main()
     assert error.value.code == 2
-    assert "dirty" in capsys.readouterr().err
+    assert ("source index" if flag else "dirty") in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_flagged_clean_checkout_is_rejected_until_flags_are_removed(source_repo, flag):
+    root, git = source_repo
+    git("update-index", flag, "scripts/ownership.json")
+    assert git("status", "--porcelain") == ""
+    with pytest.raises(ValueError, match="source index"):
+        checker.source_revision(root)
+    git("update-index", flag.replace("--", "--no-", 1), "scripts/ownership.json")
+    assert checker.source_revision(root) == git("rev-parse", "HEAD")
