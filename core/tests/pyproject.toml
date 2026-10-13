@@ -8,7 +8,6 @@ version = "0.0.0"
 requires-python = ">=3.13"
 description = "Integration tests and shared fixtures for the Panopticon workspace"
 dependencies = [
-    "host-binding-store",
     "operator-ban-store",
     "controlplane-api",
     "controlplane-tenancy",
@@ -26,7 +25,6 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-host-binding-store = { workspace = true }
 operator-ban-store = { workspace = true }
 controlplane-api = { workspace = true }
 controlplane-tenancy = { workspace = true }

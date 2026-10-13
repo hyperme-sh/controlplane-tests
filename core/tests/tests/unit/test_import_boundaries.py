@@ -45,6 +45,11 @@ def test_from_parent_cannot_hide_private_module(tmp_path):
     ('products/hypermesh-gateway/src/hypermesh_gateway_service/probe.py', 'import hypermesh_ticket.private', False),
     ('products/aiuditor/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('core/auth-service/src/auth_service/probe.py', 'import hypermesh_service.seed', False),
+    ('core/auth-service/src/auth_service/probe.py', 'import host_binding_store', False),
+    ('core/tests/tests/test_probe.py', 'import host_binding_store', False),
+    ('products/hypermesh/src/hypermesh_service/probe.py', 'import host_binding_store', True),
+    ('products/turn/src/turn_service/probe.py', 'import host_binding_store', False),
+    ('products/hypermesh/contracts/src/host_binding_store/probe.py', 'import hypermesh_service.app', False),
     ('core/e2e-tests/tests/test_probe.py', 'import hypermesh_service.seed', False),
     ('products/hypermesh/src/hypermesh_service/probe.py', 'from hypermesh_service.models import HypermeshDevice', True),
 ])
@@ -56,7 +61,9 @@ def test_named_exceptions_and_public_interfaces(tmp_path, path, statement, allow
 def test_repo_passes_and_all_python_products_are_registered():
     assert checker.violations(ROOT, CONTRACT) == []
     actual = {str(path.parent.relative_to(ROOT)) for path in (ROOT / 'products').glob('*/pyproject.toml')}
-    assert actual == set(CONTRACT['products'].values())
+    registered = set(CONTRACT['products'].values())
+    assert actual == {directory for directory in registered if len(Path(directory).parts) == 2}
+    assert all((ROOT / directory / 'pyproject.toml').is_file() for directory in registered)
 
 
 def test_core_has_no_product_exceptions():
