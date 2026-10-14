@@ -938,9 +938,11 @@ def test_runtime_members_come_from_the_final_stage():
     text = "\n".join(
         [
             "FROM base AS builder",
+            "WORKDIR /app",
             "COPY lib ./lib",
             "COPY svc ./svc",
             "FROM base",
+            "WORKDIR /app",
             "COPY svc ./svc",
             "",
         ]
@@ -1031,7 +1033,7 @@ def test_run_heredoc_is_checked_at_its_instruction(tmp_path):
 def test_heredoc_contents_are_not_dockerfile_instructions(tmp_path):
     root = workspace(tmp_path, dockerfile=DOCKERFILE + "\nRUN <<-EOF\n\tprintf 'example'\nCOPY libs/extra ./libs/extra\n\tEOF\n")
     assert checker.violations(root) == []
-    assert checker.final_stage_copies((root / "svc/Dockerfile").read_text()) == {"libs/models", "svc"}
+    assert checker.final_stage_copies((root / "svc/Dockerfile").read_text()) == {"libs/models", "svc", "pyproject.toml", "uv.lock"}
 
 
 def test_short_form_compose_build_context(tmp_path):
@@ -1061,3 +1063,110 @@ def test_frozen_run_still_installs_selected_groups(tmp_path):
     text = (root / "svc/Dockerfile").read_text() + '\nRUN uv run --frozen python\n'
     write(root, "svc/Dockerfile", text)
     assert any("dev-lib" in error and "before this RUN" in error for error in checker.violations(root))
+
+
+def test_compose_command_uses_image_uv_entrypoint(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    path = root / 'svc/Dockerfile'
+    path.write_text(path.read_text() + '\nENTRYPOINT ["uv"]\nCMD ["run", "--no-sync", "python"]\n')
+    _worker_compose(root, ['    command: [run, python]'])
+    assert any('dev-lib' in error for error in checker.violations(root))
+    _worker_compose(root, ['    command: [run, --no-sync, python]'])
+    assert checker.violations(root) == []
+
+
+def test_flow_build_context_and_dockerfile(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    write(root, 'deploy/docker-compose.yml', 'services:\n  worker:\n    build: {context: "..", dockerfile: svc/Dockerfile}\n    command: [uv, run, python]\n')
+    errors = checker.violations(root)
+    assert any('dev-lib' in error for error in errors)
+    assert not any('no Dockerfile' in error for error in errors)
+
+
+def test_wrong_copy_destination_does_not_materialize_dependency(tmp_path):
+    text = DOCKERFILE.replace('COPY libs/models ./libs/models', 'COPY libs/models ./vendor/models')
+    root = workspace(tmp_path, dockerfile=text)
+    assert any('COPY libs/models before uv sync' in error for error in checker.violations(root))
+    (root / 'svc/Dockerfile').write_text(text.replace('./vendor/models', '/app/libs/models'))
+    assert checker.violations(root) == []
+
+
+def test_stage_copy_to_wrong_destination_still_missing_dependency(tmp_path):
+    text = DOCKERFILE.replace('COPY libs/models ./libs/models', 'COPY libs/models ./libs/models')
+    text = text.replace('RUN uv sync', 'FROM base\nWORKDIR /app\nCOPY svc ./svc\nCOPY --from=0 /app/libs/models ./vendor/models\nRUN uv sync')
+    root = workspace(tmp_path, dockerfile=text)
+    assert any('COPY libs/models before uv sync' in error for error in checker.violations(root))
+    (root / 'svc/Dockerfile').write_text(text.replace('./vendor/models', './libs/models'))
+    assert checker.violations(root) == []
+
+
+def test_indented_docker_instructions_are_executed(tmp_path):
+    text = DOCKERFILE + '\n  RUN uv run --all-packages --no-default-groups python\n'
+    root = workspace(tmp_path, dockerfile=text)
+    assert any('extra-lib' in error and 'before this RUN' in error for error in checker.violations(root))
+
+
+def test_root_helper_run_does_not_install_later_service(tmp_path):
+    helper = 'FROM base AS helper\nWORKDIR /app\nCOPY pyproject.toml uv.lock ./\nRUN uv run --no-default-groups python -c "print(1)"\n'
+    root = workspace(tmp_path, dockerfile=helper + DOCKERFILE)
+    assert checker.violations(root) == []
+    # Explicit project selection still requires that service at this instruction.
+    (root / 'svc/Dockerfile').write_text(helper.replace('uv run', 'uv --directory /app/svc run') + DOCKERFILE)
+    assert any('svc-service' in error and 'before this RUN' in error for error in checker.violations(root))
+    (root / 'svc/Dockerfile').write_text(helper.replace('uv run', 'uv run --project /app/svc') + DOCKERFILE)
+    assert any('svc-service' in error and 'before this RUN' in error for error in checker.violations(root))
+
+
+def test_root_run_checks_selected_root_dependency_groups(tmp_path):
+    helper = 'FROM base\nWORKDIR /app\nCOPY pyproject.toml uv.lock ./\nRUN uv run python\n'
+    root = workspace(tmp_path, dockerfile=helper + DOCKERFILE)
+    path = root / 'pyproject.toml'
+    path.write_text(path.read_text() + '\n[dependency-groups]\ndev = ["extra-lib"]\n')
+    assert any('extra-lib' in error and 'before this RUN' in error for error in checker.violations(root))
+
+
+def test_uv_no_sync_docker_and_compose_environment(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    path = root / 'svc/Dockerfile'
+    path.write_text(path.read_text() + '\nENV UV_NO_SYNC=1\nRUN uv run python\nCMD ["uv", "run", "python"]\n')
+    assert checker.violations(root) == []
+    _worker_compose(root, ['    command: [uv, run, python]', '    environment:', '      UV_NO_SYNC: "0"'])
+    assert any('dev-lib' in error for error in checker.violations(root))
+    _worker_compose(root, ['    command: [uv, run, python]', '    environment:', '      - UV_NO_SYNC=1'])
+    assert checker.violations(root) == []
+
+
+def test_inline_uv_no_sync_overrides_docker_environment(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    path = root / 'svc/Dockerfile'
+    path.write_text(path.read_text() + '\nENV UV_NO_SYNC=1\nRUN UV_NO_SYNC=0 uv run python\n')
+    assert any('dev-lib' in error and 'before this RUN' in error for error in checker.violations(root))
+    path.write_text(path.read_text().replace('UV_NO_SYNC=0 uv run', 'UV_NO_SYNC=1 uv run'))
+    assert checker.violations(root) == []
+
+
+def test_null_compose_command_restores_image_default(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    path = root / 'svc/Dockerfile'
+    path.write_text(path.read_text() + '\nENTRYPOINT ["uv"]\nCMD ["run", "--no-sync", "python"]\n')
+    _worker_compose(root, ['    command: [run, python]'])
+    write(root, 'docker-compose.vm.yml', 'services:\n  worker:\n    command: null\n')
+    assert checker.violations(root) == []
+
+
+def test_inline_skip_does_not_skip_later_command(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    path = root / 'svc/Dockerfile'
+    path.write_text(path.read_text() + '\nRUN UV_NO_SYNC=1 uv run python && uv run python\n')
+    assert any('dev-lib' in error and 'before this RUN' in error for error in checker.violations(root))
+
+
+def test_json_copy_destination_with_flags(tmp_path):
+    text = DOCKERFILE.replace('COPY libs/models ./libs/models', 'COPY --link ["libs/models", "/app/libs/models"]')
+    root = workspace(tmp_path, dockerfile=text)
+    assert checker.violations(root) == []
+
+
+def test_flow_build_paths_ignore_nested_build_options():
+    block = '  worker:\n    build: {context: "..", args: {A: x, B: y}, cache_from: [one, two], dockerfile: "svc/Dockerfile"}'
+    assert checker.resolved_dockerfile(block, 'deploy') == 'svc/Dockerfile'
