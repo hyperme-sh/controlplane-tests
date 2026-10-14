@@ -74,6 +74,34 @@ def _decide(**overrides):
     return freshness.evaluate_freshness(**params)
 
 
+def test_publish_that_built_no_image_stays_in_sync() -> None:
+    """Every bake is older than main. The running fleet matches those bakes."""
+
+    older_stamp = "2026-09-26T16:00:00Z"
+    expected = {
+        "controlplane-edge": _row("controlplane-edge", CARRIED, OLD),
+        "auth-service": _row("auth-service", CARRIED, OLD),
+        "payment-service": _row("payment-service", CARRIED, OLDER, older_stamp),
+    }
+    edge = _edge(OLD)
+    auth = freshness.ServiceVersion("auth-service", git_sha=OLD, built_at=STAMP)
+    payment = freshness.ServiceVersion(
+        "payment-service", git_sha=OLDER, built_at=older_stamp
+    )
+    decision = _decide(
+        edge=edge,
+        services=(edge, auth, payment),
+        expected=expected,
+        main_committed_at=NOW - timedelta(hours=2),
+        drift_started_at=NOW - timedelta(hours=2),
+    )
+    assert decision.ok
+    assert decision.status == "in_sync"
+    assert decision.behind == ()
+    assert OLD != MAIN
+    assert OLDER != MAIN
+
+
 def test_docs_only_move_stays_green_when_digests_match() -> None:
     """Carried images report an old bake. The manifest for main records that bake."""
 
