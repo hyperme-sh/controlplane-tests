@@ -302,11 +302,11 @@ def test_unlocked_uv_run_requires_sources_of_copied_members(tmp_path):
     )
     (root / "docker-compose.yaml").write_text(child_flag)
     assert any("ticket-lib" in error for error in checker.violations(root))
-    frozen = child_flag.replace(
+    no_sync = child_flag.replace(
         "      - uv\n      - run\n",
-        "      - uv\n      - run\n      - --frozen\n",
+        "      - uv\n      - run\n      - --no-sync\n",
     )
-    (root / "docker-compose.yaml").write_text(frozen)
+    (root / "docker-compose.yaml").write_text(no_sync)
     assert checker.violations(root) == []
 
 
@@ -578,7 +578,7 @@ def test_global_uv_options_still_detect_an_unlocked_run(tmp_path):
                 "  worker:",
                 "    build:",
                 "      dockerfile: svc/Dockerfile",
-                '    entrypoint: ["uv", "-q", "run", "--frozen", "python", "-m", "svc_service.app"]',
+                '    entrypoint: ["uv", "-q", "run", "--no-sync", "python", "-m", "svc_service.app"]',
                 "",
             ]
         )
@@ -1015,3 +1015,49 @@ def test_dockerfile_metadata_does_not_execute_uv(tmp_path):
         assert checker.violations(root) == []
     write(root, 'svc/Dockerfile', text + '\nCMD ["uv", "run", "python"]\n')
     assert any('dev-lib' in error for error in checker.violations(root))
+
+
+
+def test_run_heredoc_is_checked_at_its_instruction(tmp_path):
+    text = DOCKERFILE.replace("ENV PYTHONPATH", "RUN <<'EOF'\nuv run --all-packages --no-dev python\nEOF\nCOPY libs/extra ./libs/extra\nENV PYTHONPATH")
+    root = workspace(tmp_path, dockerfile=text)
+    assert any("extra-lib" in error and "before this RUN" in error for error in checker.violations(root))
+    text = text.replace("COPY libs/extra ./libs/extra\n", "")
+    text = text.replace("RUN <<'EOF'", "COPY libs/extra ./libs/extra\nRUN <<'EOF'")
+    write(root, "svc/Dockerfile", text)
+    assert checker.violations(root) == []
+
+
+def test_heredoc_contents_are_not_dockerfile_instructions(tmp_path):
+    root = workspace(tmp_path, dockerfile=DOCKERFILE + "\nRUN <<-EOF\n\tprintf 'example'\nCOPY libs/extra ./libs/extra\n\tEOF\n")
+    assert checker.violations(root) == []
+    assert checker.final_stage_copies((root / "svc/Dockerfile").read_text()) == {"libs/models", "svc"}
+
+
+def test_short_form_compose_build_context(tmp_path):
+    root = workspace(tmp_path)
+    write(root, "docker-compose.yaml", "services:\n  worker:\n    build: ./svc\n    command: [uv, run, --all-packages, python]\n")
+    errors = checker.violations(root)
+    assert any("extra-lib" in error for error in errors)
+    assert not any("no Dockerfile" in error for error in errors)
+    assert checker.resolved_dockerfile("  worker:\n    build: ../svc\n", "deploy") == "svc/Dockerfile"
+
+
+def test_docker_exec_entrypoint_and_cmd_form_one_run(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    text = (root / "svc/Dockerfile").read_text() + '\nENTRYPOINT ["uv"]\nCMD ["run", "python"]\n'
+    write(root, "svc/Dockerfile", text)
+    assert any("dev-lib" in error for error in checker.violations(root))
+    write(root, "svc/Dockerfile", text + '\nCMD ["run", "--no-sync", "python"]\n')
+    assert checker.violations(root) == []
+
+
+def test_frozen_run_still_installs_selected_groups(tmp_path):
+    root = _product_with_dev_group(tmp_path)
+    _worker_compose(root, ['    command: [uv, run, --frozen, python]'])
+    assert any("dev-lib" in error for error in checker.violations(root))
+    _worker_compose(root, ['    command: [uv, run, --frozen, --no-sync, python]'])
+    assert checker.violations(root) == []
+    text = (root / "svc/Dockerfile").read_text() + '\nRUN uv run --frozen python\n'
+    write(root, "svc/Dockerfile", text)
+    assert any("dev-lib" in error and "before this RUN" in error for error in checker.violations(root))
