@@ -51,7 +51,7 @@ def source_database(require_docker):
                 ),
                 {"event": completed},
             )
-        migrations._prepare_event_source_index(url)
+        migrations.prepare_event_source_index(url)
         migrations.upgrade(url, chains=["events"])
         try:
             yield url, engine
@@ -467,7 +467,7 @@ def test_concurrent_index_preflight_allows_publishers_and_is_required_for_existi
             # The preflight did not accidentally run the schema upgrade.
             assert migrations.current_heads(url)["events"] == "events_0053_baseline"
             migrations.upgrade(url, chains=["events"])
-            migrations._prepare_event_source_index(
+            migrations.prepare_event_source_index(
                 url
             )  # Safe to rerun after completion.
         finally:

@@ -34,7 +34,7 @@ def test_subject_uniqueness_is_per_membership_scope():
 
         with engine.begin() as db:
             insert(db, None, identity=original)
-        migrations._prepare_event_source_index(url)
+        migrations.prepare_event_source_index(url)
         migrations.upgrade(url)
         tenants = [uuid.uuid4(), uuid.uuid4()]
         with engine.begin() as db:

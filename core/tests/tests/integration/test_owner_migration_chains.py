@@ -192,7 +192,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     from controlplane_db.startup import _owners
     url = databases['reload']
     before = snapshot(url)
-    migrations._prepare_event_source_index(url)
+    migrations.prepare_event_source_index(url)
     _owners(url)
     _owners(url)
     assert migrations.current_heads(url) == migrations.chain_heads()
@@ -279,7 +279,7 @@ def downgrade():
     pass
 """)
     url = databases['reload_failure']
-    migrations._prepare_event_source_index(url)
+    migrations.prepare_event_source_index(url)
     before = snapshot(url)
     with pytest.raises(RuntimeError, match='planted reload failure'):
         _owners(url, root)
@@ -297,7 +297,7 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
     monkeypatch.setenv("CONTROLPLANE_DB_BOOTSTRAP", "1" if database == "marketplace_fresh" else "")
     monkeypatch.setattr(marketplace, "MARKETPLACE_TENANT_ID", tenant)
     if mode == "owners" and database == "marketplace_owners":
-        migrations._prepare_event_source_index(url)
+        migrations.prepare_event_source_index(url)
     assert startup.main() == 0
     assert startup.main() == 0
     engine = create_engine(url)
