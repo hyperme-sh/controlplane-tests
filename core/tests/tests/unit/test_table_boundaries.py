@@ -33,6 +33,8 @@ def test_current_runtime_edges_have_explicit_owners_or_named_exceptions():
         'query = "SELECT * FROM users, hypermesh_leases WHERE users.id = hypermesh_leases.id"',
         'query = "SELECT * FROM unnest(ARRAY[1]) u(n), hypermesh_leases h"',
         'query = "SELECT * FROM pg_catalog.unnest(ARRAY[1]) u(n), public.hypermesh_leases h"',
+        'query = "SELECT * FROM unnest(ARRAY(SELECT id FROM users WHERE id IS NOT NULL)) u, hypermesh_leases h"',
+        'query = "SELECT * FROM unnest(ARRAY(SELECT id FROM users ORDER BY id LIMIT 1)) u, public.hypermesh_leases h"',
         'query = "ALTER TABLE IF EXISTS hypermesh_leases ADD COLUMN bad integer"',
         'query = "CREATE INDEX bad ON hypermesh_leases(id)"',
         "from hypermesh_service.models import *",
@@ -159,10 +161,14 @@ def test_other_dollar_literals_cannot_declare_the_body_language():
         "CREATE FUNCTION f(x text DEFAULT $d$ ; $d$) RETURNS void AS "
         "$b$ SELECT * INTO hypermesh_leases FROM users $b$ LANGUAGE sql;"
     )
-    assert checker.sql_tables(
-        "CREATE FUNCTION f(x text DEFAULT $d$LANGUAGE sql$d$) RETURNS void "
-        "LANGUAGE plpgsql AS $b$ BEGIN SELECT 1 INTO hypermesh_leases; END $b$;"
-    ) == set()
+    assert (
+        checker.sql_tables(
+            "CREATE FUNCTION f(x text DEFAULT $d$LANGUAGE sql$d$) RETURNS void "
+            "LANGUAGE plpgsql AS $b$ BEGIN SELECT 1 INTO hypermesh_leases; END $b$;"
+        )
+        == set()
+    )
+
 
 def test_nested_dynamic_sql_into_targets_stay_in_scan():
     assert checker.sql_tables(
@@ -178,11 +184,13 @@ def test_nested_dynamic_sql_into_targets_stay_in_scan():
         "$f$INSERT INTO users SELECT * FROM hypermesh_leases$f$;"
     )
 
+
 def test_or_replace_trigger_target_is_checked():
     assert checker.sql_tables(
         "CREATE OR REPLACE TRIGGER guard BEFORE INSERT ON public.hypermesh_leases "
         "FOR EACH ROW EXECUTE FUNCTION public.guard();"
     ) == {"hypermesh_leases"}
+
 
 def test_trigger_target_is_checked_without_dml_references():
     assert checker.sql_tables(
@@ -191,11 +199,11 @@ def test_trigger_target_is_checked_without_dml_references():
 
 
 def test_row_comparisons_and_locks_do_not_introduce_table_targets():
-    assert checker.sql_tables('''
+    assert checker.sql_tables("""
         SELECT 1 FROM public.billing_records b WHERE
         ROW(b.id, b.tenant_id) IS DISTINCT FROM ROW(NEW.id, NEW.tenant_id)
         AND b.amount IS NOT DISTINCT FROM OLD.amount FOR UPDATE;
-    ''') == {'billing_records'}
+    """) == {"billing_records"}
 
 
 def test_subscription_sql_keeps_real_table_targets_and_ignores_roles_and_builtins():
@@ -211,3 +219,33 @@ def test_subscription_sql_keeps_real_table_targets_and_ignores_roles_and_builtin
         REVOKE ALL ON FUNCTION public.f() FROM PUBLIC;
         DELETE FROM billing_records;
     """) == {"hypermesh_leases", "billing_records"}
+
+
+@pytest.mark.parametrize(
+    "nested_clause", ["WHERE id IS NOT NULL", "ORDER BY id", "LIMIT 1"]
+)
+@pytest.mark.parametrize(
+    "relation",
+    [
+        "unnest(ARRAY(SELECT id FROM users {clause})) u",
+        "pg_catalog.unnest(ARRAY(SELECT id FROM users {clause})) u",
+        "(SELECT id FROM users {clause}) u",
+    ],
+)
+def test_nested_from_clauses_do_not_hide_following_relations(nested_clause, relation):
+    expression = relation.format(clause=nested_clause)
+    assert checker.sql_tables(
+        f'SELECT * FROM {expression}, public.hypermesh_leases h, "hypermesh_payouts" p'
+    ) == {"users", "hypermesh_leases", "hypermesh_payouts"}
+
+
+def test_nested_argument_commas_and_top_level_clauses_are_not_relations():
+    assert checker.sql_tables("""
+        SELECT * FROM unnest(ARRAY(SELECT id FROM users WHERE id IS NOT NULL)) u,
+            unnest(ARRAY[first_value, second_value]) v,
+            (SELECT id FROM billing_records ORDER BY id LIMIT 1) b,
+            hypermesh_leases h
+        WHERE h.id IN (SELECT id FROM hypermesh_jobs)
+        ORDER BY first_value, second_value;
+        SELECT first_value, second_value;
+    """) == {"users", "billing_records", "hypermesh_leases", "hypermesh_jobs"}
