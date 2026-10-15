@@ -51,6 +51,7 @@ def source_database(require_docker):
                 ),
                 {"event": completed},
             )
+        migrations._prepare_event_source_index(url)
         migrations.upgrade(url, chains=["events"])
         try:
             yield url, engine
@@ -292,3 +293,188 @@ def test_old_registration_signature_retains_configured_source_filter(source_data
         )
     insert(engine, event_type, "invoice-service", 3)
     assert delivery_ids(engine, group) == {keep}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [None, SOURCE])
+async def test_cursor_reset_filters_updates_and_backfill(source_database, source):
+    url, engine = source_database
+    group, event_type = uuid.uuid4().hex, f"test.reset.{uuid.uuid4().hex}.v1"
+    old_other = insert(engine, event_type, "invoice-service", 0)
+    first = insert(engine, event_type, SOURCE, 1)
+    seen = []
+
+    class Payload(BaseModel):
+        n: int
+
+    async def handle(envelope, payload):
+        seen.append((envelope.service, payload.n))
+
+    consumer = RoutingControlPlaneConsumer(
+        url,
+        [],
+        group,
+        {event_type: (Payload, handle)},
+        source_service=source,
+        batch_size=100,
+    )
+    try:
+        await consumer.poll_once()
+        second = insert(engine, event_type, SOURCE, 2)
+        missing_other = insert(engine, event_type, "invoice-service", 3)
+        await consumer.poll_once()
+        with engine.begin() as db:
+            # Exercise both UPDATE of a pre-filter retained delivery and INSERT
+            # of historical rows that do not currently have any delivery.
+            db.execute(
+                text(
+                    "INSERT INTO controlplane_event_deliveries(event_id,consumer_group,status) "
+                    "VALUES (:event,:group,'delivered') ON CONFLICT DO NOTHING"
+                ),
+                {"event": old_other, "group": group},
+            )
+            db.execute(
+                text(
+                    "DELETE FROM controlplane_event_deliveries WHERE consumer_group=:group AND event_id IN (:second,:other)"
+                ),
+                {"group": group, "second": second, "other": missing_other},
+            )
+        await consumer.reset_cursor()
+        with engine.connect() as db:
+            old_status = db.execute(
+                text(
+                    "SELECT status FROM controlplane_event_deliveries WHERE consumer_group=:group AND event_id=:event"
+                ),
+                {"group": group, "event": old_other},
+            ).scalar_one()
+        assert old_status == ("pending" if source is None else "delivered")
+        assert delivery_ids(engine, group) == (
+            {old_other, first, second, missing_other}
+            if source is None
+            else {old_other, first, second}
+        )
+        before = len(seen)
+        await consumer.poll_once()
+        replayed = seen[before:]
+        assert replayed == (
+            [("invoice-service", 0), (SOURCE, 1), (SOURCE, 2), ("invoice-service", 3)]
+            if source is None
+            else [(SOURCE, 1), (SOURCE, 2)]
+        )
+        # A nonzero cursor must not reset the completed earlier deposit.
+        await consumer.reset_cursor(first)
+        before = len(seen)
+        await consumer.poll_once()
+        assert seen[before:] == (
+            [(SOURCE, 2), ("invoice-service", 3)] if source is None else [(SOURCE, 2)]
+        )
+    finally:
+        await consumer.stop()
+
+
+def test_first_old_image_registration_keeps_reserved_deposit_source(require_docker):
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
+        migrations.upgrade(url, chains=["events"])
+        engine = create_engine(url)
+        try:
+            keep = insert(engine, "payment.succeeded.v1", SOURCE, 1)
+            insert(engine, "payment.succeeded.v1", "invoice-service", 2)
+            group = "payment.deposit.servicebus-outbox.v1"
+            with engine.begin() as db:
+                db.execute(
+                    text(
+                        "SELECT register_controlplane_event_consumer(:group, ARRAY['payment.succeeded.v1'], 'earliest', 5)"
+                    ),
+                    {"group": group},
+                )
+            with engine.begin() as db:
+                register(db, group, "payment.succeeded.v1", SOURCE)
+            assert delivery_ids(engine, group) == {keep}
+        finally:
+            engine.dispose()
+
+
+def test_concurrent_index_preflight_allows_publishers_and_is_required_for_existing_log(
+    require_docker, monkeypatch
+):
+    import time
+    from sqlalchemy import event
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = normalize_sync_sqlalchemy_url(pg.get_connection_url())
+        migrations.upgrade(url, chains=["events"], baseline_only=True)
+        engine = create_engine(url)
+        entered, errors = threading.Event(), []
+        worker_pid = []
+
+        def prepare():
+            try:
+                # Exercise the real owner CLI, including its AUTOCOMMIT connection.
+                monkeypatch.setenv("DATABASE_URL", url)
+                monkeypatch.setattr(
+                    "sys.argv", ["migrations", "prepare-event-source-index"]
+                )
+                assert migrations.main() == 0
+            except Exception as exc:
+                errors.append(exc)
+
+        def starting(connection, cursor, statement, parameters, context, executemany):
+            if statement.startswith("CREATE INDEX CONCURRENTLY"):
+                worker_pid.append(
+                    connection.exec_driver_sql("SELECT pg_backend_pid()").scalar_one()
+                )
+                entered.set()
+
+        # Existing databases must not silently fall back to a blocking build.
+        with pytest.raises(RuntimeError, match="prepare-event-source-index"):
+            migrations.upgrade(url, chains=["events"])
+        assert migrations.current_heads(url)["events"] == "events_0053_baseline"
+        event.listen(type(engine), "before_cursor_execute", starting)
+        hold = engine.connect()
+        tx = hold.begin()
+        thread = None
+        try:
+            hold.exec_driver_sql(
+                "INSERT INTO controlplane_events(event_type,envelope) VALUES ('test.index.v1','{}')"
+            )
+            thread = threading.Thread(target=prepare)
+            thread.start()
+            assert entered.wait(5)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with engine.connect() as db:
+                    building = db.execute(
+                        text(
+                            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid "
+                            "AND relation='public.controlplane_events'::regclass "
+                            "AND mode='ShareUpdateExclusiveLock' AND granted)"
+                        ),
+                        {"pid": worker_pid[0]},
+                    ).scalar_one()
+                if building:
+                    break
+                time.sleep(0.02)
+            assert building and thread.is_alive() and not errors
+            with engine.begin() as publisher:
+                publisher.exec_driver_sql("SET LOCAL lock_timeout='500ms'")
+                publisher.exec_driver_sql(
+                    "INSERT INTO controlplane_events(event_type,envelope) VALUES ('test.index.v1','{}')"
+                )
+            tx.commit()
+            thread.join(10)
+            assert not thread.is_alive() and not errors
+            # The preflight did not accidentally run the schema upgrade.
+            assert migrations.current_heads(url)["events"] == "events_0053_baseline"
+            migrations.upgrade(url, chains=["events"])
+            migrations._prepare_event_source_index(
+                url
+            )  # Safe to rerun after completion.
+        finally:
+            if tx.is_active:
+                tx.rollback()
+            hold.close()
+            if thread is not None:
+                thread.join(15)
+            event.remove(type(engine), "before_cursor_execute", starting)
+            engine.dispose()

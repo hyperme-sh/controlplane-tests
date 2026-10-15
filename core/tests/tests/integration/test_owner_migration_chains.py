@@ -192,6 +192,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     from controlplane_db.startup import _owners
     url = databases['reload']
     before = snapshot(url)
+    migrations._prepare_event_source_index(url)
     _owners(url)
     _owners(url)
     assert migrations.current_heads(url) == migrations.chain_heads()
@@ -278,6 +279,7 @@ def downgrade():
     pass
 """)
     url = databases['reload_failure']
+    migrations._prepare_event_source_index(url)
     before = snapshot(url)
     with pytest.raises(RuntimeError, match='planted reload failure'):
         _owners(url, root)
@@ -294,6 +296,8 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
     monkeypatch.setenv("CONTROLPLANE_MIGRATION_MODE", mode)
     monkeypatch.setenv("CONTROLPLANE_DB_BOOTSTRAP", "1" if database == "marketplace_fresh" else "")
     monkeypatch.setattr(marketplace, "MARKETPLACE_TENANT_ID", tenant)
+    if mode == "owners" and database == "marketplace_owners":
+        migrations._prepare_event_source_index(url)
     assert startup.main() == 0
     assert startup.main() == 0
     engine = create_engine(url)
@@ -534,11 +538,14 @@ def assert_source_subscription_delta(before, after):
     assert source_registration['grants'] == before['functions'][signature.replace(', p_source_service text', '')]['grants']
     for signature in (
         signature.replace(', p_source_service text', ''), 'deliver_controlplane_event()',
+        'replay_controlplane_event_deliveries(p_group text, p_after_event_id bigint)',
     ):
         changed = after['functions'][signature]
         assert changed['grants'] == before['functions'][signature]['grants']
         if signature == 'deliver_controlplane_event()':
             assert "s.source_service = NEW.envelope->>'service'" in changed['definition']
+        elif signature.startswith('replay_controlplane_event_deliveries'):
+            assert changed['definition'].count("s.source_service = e.envelope->>'service'") == 2
         else:
             assert 'SELECT s.source_service INTO v_source' in changed['definition']
         after['functions'][signature] = before['functions'][signature]

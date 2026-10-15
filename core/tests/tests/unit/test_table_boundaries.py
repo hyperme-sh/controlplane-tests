@@ -31,6 +31,8 @@ def test_current_runtime_edges_have_explicit_owners_or_named_exceptions():
         "from hypermesh_service import models as hm\nquery = hm.LeaseRow",
         'query = table("hypermesh_leases")',
         'query = "SELECT * FROM users, hypermesh_leases WHERE users.id = hypermesh_leases.id"',
+        'query = "SELECT * FROM unnest(ARRAY[1]) u(n), hypermesh_leases h"',
+        'query = "SELECT * FROM pg_catalog.unnest(ARRAY[1]) u(n), public.hypermesh_leases h"',
         'query = "ALTER TABLE IF EXISTS hypermesh_leases ADD COLUMN bad integer"',
         'query = "CREATE INDEX bad ON hypermesh_leases(id)"',
         "from hypermesh_service.models import *",
