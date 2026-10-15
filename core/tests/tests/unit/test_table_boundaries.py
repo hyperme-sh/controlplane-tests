@@ -194,3 +194,18 @@ def test_row_comparisons_and_locks_do_not_introduce_table_targets():
         ROW(b.id, b.tenant_id) IS DISTINCT FROM ROW(NEW.id, NEW.tenant_id)
         AND b.amount IS NOT DISTINCT FROM OLD.amount FOR UPDATE;
     ''') == {'billing_records'}
+
+
+def test_subscription_sql_keeps_real_table_targets_and_ignores_roles_and_builtins():
+    assert checker.sql_tables("""
+        REVOKE ALL ON FUNCTION public.register_group(text) FROM PUBLIC;
+        INSERT INTO controlplane_event_subscriptions(consumer_group)
+        SELECT t.name FROM unnest(ARRAY['one']) AS t(name)
+        ON CONFLICT (consumer_group) DO UPDATE SET consumer_group=EXCLUDED.consumer_group;
+        REVOKE UPDATE ON TABLE public.billing_records FROM PUBLIC;
+    """) == {"controlplane_event_subscriptions", "billing_records"}
+    assert checker.sql_tables("""
+        SELECT * FROM pg_catalog.unnest(ARRAY(SELECT id FROM hypermesh_leases));
+        REVOKE ALL ON FUNCTION public.f() FROM PUBLIC;
+        DELETE FROM billing_records;
+    """) == {"hypermesh_leases", "billing_records"}
