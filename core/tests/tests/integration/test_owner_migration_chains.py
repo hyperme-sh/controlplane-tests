@@ -192,6 +192,7 @@ def test_reload_adopts_existing_database_and_is_repeatable(databases, tmp_path):
     from controlplane_db.startup import _owners
     url = databases['reload']
     before = snapshot(url)
+    migrations.prepare_event_source_index(url)
     _owners(url)
     _owners(url)
     assert migrations.current_heads(url) == migrations.chain_heads()
@@ -278,6 +279,7 @@ def downgrade():
     pass
 """)
     url = databases['reload_failure']
+    migrations.prepare_event_source_index(url)
     before = snapshot(url)
     with pytest.raises(RuntimeError, match='planted reload failure'):
         _owners(url, root)
@@ -294,6 +296,8 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
     monkeypatch.setenv("CONTROLPLANE_MIGRATION_MODE", mode)
     monkeypatch.setenv("CONTROLPLANE_DB_BOOTSTRAP", "1" if database == "marketplace_fresh" else "")
     monkeypatch.setattr(marketplace, "MARKETPLACE_TENANT_ID", tenant)
+    if mode == "owners" and database == "marketplace_owners":
+        migrations.prepare_event_source_index(url)
     assert startup.main() == 0
     assert startup.main() == 0
     engine = create_engine(url)
@@ -510,7 +514,41 @@ def assert_cache_migration_delta(before, after):
         "'active'::character varying])::text[]))",
     ])
     lease_indexes.sort(key=lambda row: row[0])
+    assert_source_subscription_delta(expected, after)
     assert after == expected
+
+
+def assert_source_subscription_delta(before, after):
+    subscriptions = after['tables']['controlplane_event_subscriptions']
+    added = [column for column in subscriptions['columns'] if column[0] == 'source_service']
+    assert len(added) == 1 and added[0][1:4] == ['text', False, None]
+    subscriptions['columns'].remove(added[0])
+    indexes = after['tables']['controlplane_events']['indexes']
+    added = [index for index in indexes if index[0] == 'ix_controlplane_events_type_source_id']
+    assert len(added) == 1
+    assert "event_type, ((envelope ->> 'service'::text)), id" in added[0][1]
+    indexes.remove(added[0])
+    signature = ('register_controlplane_event_consumer(p_group text, p_event_types text[], '
+                 'p_mode text, p_max_attempts integer, p_source_service text)')
+    source_registration = after['functions'].pop(signature)
+    definition = source_registration['definition']
+    assert 'SECURITY DEFINER' in definition and "'pg_catalog', 'public', 'pg_temp'" in definition
+    assert "e.envelope->>'service' = p_source_service" in definition
+    assert 'source filter cannot change' in definition
+    assert source_registration['grants'] == before['functions'][signature.replace(', p_source_service text', '')]['grants']
+    for signature in (
+        signature.replace(', p_source_service text', ''), 'deliver_controlplane_event()',
+        'replay_controlplane_event_deliveries(p_group text, p_after_event_id bigint)',
+    ):
+        changed = after['functions'][signature]
+        assert changed['grants'] == before['functions'][signature]['grants']
+        if signature == 'deliver_controlplane_event()':
+            assert "s.source_service = NEW.envelope->>'service'" in changed['definition']
+        elif signature.startswith('replay_controlplane_event_deliveries'):
+            assert changed['definition'].count("s.source_service = e.envelope->>'service'") == 2
+        else:
+            assert 'SELECT s.source_service INTO v_source' in changed['definition']
+        after['functions'][signature] = before['functions'][signature]
 
 
 def test_payout_subject_forward_migration_preserves_receipt_and_refuses_lossy_downgrade():
