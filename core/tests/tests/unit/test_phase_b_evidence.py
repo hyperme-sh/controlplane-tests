@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -22,19 +23,73 @@ COMMIT_TIME = datetime(2026, 10, 12, tzinfo=UTC)
 
 
 def record(name, hour=1, **fields):
-    return {
+    result = {
         "id": name,
         "revision": REVISION,
         "url": f"https://example.org/evidence/{name}",
         "recorded_at": f"2026-10-12T{hour:02}:00:00+00:00",
         "passed": True,
     } | fields
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        at = datetime.fromisoformat(result["recorded_at"])
+        token = uuid5(NAMESPACE_URL, name).hex
+        ready_at, transfer_at, created_at, paid_at = [
+            (at - timedelta(seconds=seconds)).isoformat()
+            for seconds in (120, 60, 30, 10)
+        ]
+        result.update(
+            payout_method="fiat_bank",
+            source_charge_type="stablecoin",
+            tenant_id="11111111-1111-1111-1111-111111111111",
+            host_org_id="22222222-2222-2222-2222-222222222222",
+            lease_id=str(uuid5(NAMESPACE_URL, "lease" + name)),
+            billing_record_id=str(uuid5(NAMESPACE_URL, "billing" + name)),
+            readiness=record(
+                "ready-" + name,
+                hour,
+                recorded_at=ready_at,
+                stripe_transfers="active",
+                payouts_enabled=True,
+                payout_requirements_clear=True,
+                destination_requirements_clear=True,
+                ownership_verified=True,
+                default_for_currency=True,
+                currency="usd",
+                bank_status="new",
+                account_id="acct_host",
+                bank_id="ba_host",
+            ),
+            connect_transfer={
+                "id": "tr_" + token,
+                "created_at": transfer_at,
+                "amount_cents": 100,
+                "currency": "usd",
+                "livemode": False,
+                "account_id": "acct_host",
+            },
+            bank_payout=record(
+                "paid-" + name,
+                hour,
+                recorded_at=paid_at,
+                payout_id="po_" + token,
+                created_at=created_at,
+                status="paid",
+                livemode=False,
+                currency="usd",
+                amount_cents=100,
+                account_id="acct_host",
+                bank_id="ba_host",
+                transfer_id="tr_" + token,
+            ),
+        )
+    return result
 
 
 @pytest.fixture
 def bundle():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "payout_method": "fiat_bank",
         "environment": "test",
         "revision": REVISION,
         "gateway_runs": [record(f"gateway-{i}", i) for i in (2, 3, 4)],
@@ -61,12 +116,51 @@ def bundle():
             host="AGX64-1",
             owner_approved=True,
             connect_onboarding=True,
-            payout=True,
+            bank_payout_id="po_" + uuid5(NAMESPACE_URL, "stripe-5").hex,
+            tenant_id="11111111-1111-1111-1111-111111111111",
+            host_org_id="22222222-2222-2222-2222-222222222222",
             enrolled_at="2026-10-12T01:00:00+00:00",
         ),
         "test_credit_removed": record("retired", 9, path_disabled=True),
         "boundary": record("boundary"),
         "closed_issues": sorted(checker.CLOSE_ISSUES),
+        "closed_infra_issues": [222],
+        "fiat_rollout": record(
+            "rollout",
+            0,
+            recorded_at="2026-10-12T00:30:00+00:00",
+            rendered_payout_method="fiat_bank",
+            prerequisites=[
+                record(
+                    f"prereq-{repo}-{issue}",
+                    0,
+                    recorded_at="2026-10-12T00:20:00+00:00",
+                    repo=repo,
+                    issue=issue,
+                    merged=True,
+                    deployed=True,
+                    merged_revision="b" * 40,
+                    deployed_at="2026-10-12T00:15:00+00:00",
+                )
+                for repo, issue in sorted(checker.FIAT_PREREQUISITES)
+            ],
+            enrollments_before=[
+                {
+                    "tenant_id": "11111111-1111-1111-1111-111111111111",
+                    "host_org_id": "22222222-2222-2222-2222-222222222222",
+                    "attempt_id": "original",
+                    "stripe_account_id": "acct_host",
+                }
+            ],
+            enrollments_after=[
+                {
+                    "tenant_id": "11111111-1111-1111-1111-111111111111",
+                    "host_org_id": "22222222-2222-2222-2222-222222222222",
+                    "attempt_id": "original",
+                    "stripe_account_id": "acct_host",
+                }
+            ],
+        ),
     }
 
 
@@ -157,7 +251,9 @@ def test_stripe_requires_three_full_journeys_not_a_consecutive_streak(bundle):
         1,
         record("stripe-failed", 5, mode="test", passed=False, stages={}),
     )
-    bundle["stripe_runs"][0]["recorded_at"] = "2026-10-12T04:30:00+00:00"
+    # Keep the first successful payment's financial evidence intact and place
+    # the failed attempt between complete successful journeys.
+    bundle["stripe_runs"][1]["recorded_at"] = "2026-10-12T05:30:00+00:00"
     assert check(bundle) == []
 
 
@@ -396,3 +492,135 @@ def test_flagged_clean_checkout_is_rejected_until_flags_are_removed(source_repo,
         checker.source_revision(root)
     git("update-index", flag.replace("--", "--no-", 1), "scripts/ownership.json")
     assert checker.source_revision(root) == git("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("version", [1, True, "2"])
+def test_legacy_schema_cannot_accept_fiat_exit(bundle, version):
+    bundle["schema_version"] = version
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs"])
+@pytest.mark.parametrize(
+    "key", ["payout_method", "readiness", "connect_transfer", "bank_payout", "lease_id"]
+)
+def test_fiat_run_requires_explicit_bank_journey(bundle, group, key):
+    del bundle[group][0][key]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("status", ["pending", "in_transit", "failed", "canceled"])
+def test_nonterminal_or_failed_bank_payout_cannot_pass(bundle, status):
+    bundle["gateway_runs"][0]["bank_payout"]["status"] = status
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("payouts_enabled", False),
+        ("stripe_transfers", "inactive"),
+        ("bank_status", "errored"),
+        ("bank_status", "verification_failed"),
+        ("bank_status", "tokenized_account_number_deactivated"),
+        ("bank_status", "verified"),
+        ("bank_status", "unknown"),
+        ("default_for_currency", False),
+        ("currency", "eur"),
+        ("ownership_verified", False),
+        ("destination_requirements_clear", False),
+        ("payout_requirements_clear", False),
+    ],
+)
+def test_unready_bank_refuses_even_when_transfer_capability_active(bundle, key, value):
+    bundle["gateway_runs"][0]["readiness"][key] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["account_id", "bank_id", "transfer_id"])
+def test_terminal_payout_must_match_transfer_and_destination(bundle, key):
+    bundle["stripe_runs"][0]["bank_payout"][key] = "different"
+    assert check(bundle)
+
+
+def test_readiness_must_precede_transfer_and_be_fresh(bundle):
+    ready = bundle["gateway_runs"][0]["readiness"]
+    ready["recorded_at"] = "2026-10-12T01:50:00+00:00"
+    assert check(bundle)
+    ready["recorded_at"] = "2026-10-12T02:00:00+00:00"
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["merged", "deployed"])
+def test_prerequisite_cannot_be_unmerged_or_undeployed(bundle, key):
+    bundle["fiat_rollout"]["prerequisites"][0][key] = False
+    assert check(bundle)
+
+
+def test_missing_prerequisite_and_infra_closure_fail(bundle):
+    bundle["fiat_rollout"]["prerequisites"].pop()
+    assert check(bundle)
+    bundle["closed_infra_issues"] = []
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["stripe_account_id", "attempt_id"])
+def test_rollout_cannot_replace_existing_enrollment(bundle, key):
+    bundle["fiat_rollout"]["enrollments_after"][0][key] = "replacement"
+    assert check(bundle)
+
+
+def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
+    bundle["stripe_runs"][0]["source_charge_type"] = "non_stablecoin"
+    assert check(bundle)
+    bundle["fiat_rollout"]["prerequisites"].append(
+        record(
+            "decoupling",
+            0,
+            recorded_at="2026-10-12T00:20:00+00:00",
+            repo="panopticon",
+            issue=491,
+            merged=True,
+            deployed=True,
+            merged_revision="b" * 40,
+            deployed_at="2026-10-12T00:15:00+00:00",
+        )
+    )
+    assert check(bundle) == []
+
+
+def test_payout_cannot_be_reused_for_another_lease(bundle):
+    bundle["gateway_runs"][1]["bank_payout"]["payout_id"] = bundle["gateway_runs"][0][
+        "bank_payout"
+    ]["payout_id"]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("field", ["lease_id", "billing_record_id"])
+def test_each_successful_run_requires_fresh_financial_scope(bundle, field):
+    bundle["gateway_runs"][1][field] = bundle["gateway_runs"][0][field]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "host_org_id"])
+def test_journeys_cannot_use_another_host_enrollment(bundle, field):
+    bundle["stripe_runs"][0][field] = "99999999-9999-9999-9999-999999999999"
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["readiness", "bank_payout", "connect_transfer"])
+@pytest.mark.parametrize("malformed", [None, [], True])
+def test_malformed_financial_evidence_returns_errors(bundle, key, malformed):
+    bundle["gateway_runs"][0][key] = malformed
+    assert check(bundle)
+
+
+def test_malformed_enrollment_payout_reference_returns_errors(bundle):
+    bundle["enrollment"]["bank_payout_id"] = []
+    assert check(bundle)
+
+
+def test_rollout_recipient_must_match_journey_owner_binding(bundle):
+    bundle["fiat_rollout"]["enrollments_before"][0]["stripe_account_id"] = "acct_other"
+    bundle["fiat_rollout"]["enrollments_after"][0]["stripe_account_id"] = "acct_other"
+    assert check(bundle)
