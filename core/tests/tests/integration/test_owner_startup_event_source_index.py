@@ -63,7 +63,7 @@ def owners_mode(monkeypatch):
 def test_fresh_database_builds_index_in_schema_transaction(migration_database, owners_mode):
     url = migration_database()
     # No event log yet: nothing to prepare concurrently.
-    assert migrations.prepare_pending_event_source_index(url) is False
+    assert migrations._prepare_pending_event_source_index(url) is False
     owners_mode(url, bootstrap=True)
     assert main() == 0
     assert migrations.current_heads(url) == migrations.chain_heads()
@@ -89,7 +89,7 @@ def test_previously_stuck_database_upgrades_unattended(migration_database, owner
     finally:
         engine.dispose()
     # Rerunning startup after success is a no-op for the preflight.
-    assert migrations.prepare_pending_event_source_index(url) is False
+    assert migrations._prepare_pending_event_source_index(url) is False
     assert main() == 0
 
 
