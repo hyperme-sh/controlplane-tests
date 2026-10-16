@@ -38,6 +38,32 @@ def record(name, hour=1, **fields):
             for seconds in (120, 60, 30, 10)
         ]
         result.update(
+            started_at=(at - timedelta(minutes=5)).isoformat(),
+            settlement=record(
+                "settled-" + name,
+                hour,
+                recorded_at=(at - timedelta(seconds=150)).isoformat(),
+                host_payable_cents=100,
+                currency="usd",
+                tenant_id="11111111-1111-1111-1111-111111111111",
+                host_org_id="22222222-2222-2222-2222-222222222222",
+                lease_id=str(uuid5(NAMESPACE_URL, "lease" + name)),
+                billing_record_id=str(uuid5(NAMESPACE_URL, "billing" + name)),
+            ),
+            bank_followup=record(
+                "followup-" + name,
+                hour,
+                recorded_at=(at + timedelta(days=8)).isoformat(),
+                events_from_at=created_at,
+                events_through_at=(at + timedelta(days=8)).isoformat(),
+                events_complete=True,
+                later_failure_seen=False,
+                additional_bank_closures_accounted_for=True,
+                status="paid",
+                payout_id="po_" + token,
+                account_id="acct_host",
+                bank_id="ba_host",
+            ),
             payout_method="fiat_bank",
             source_charge_type="stablecoin",
             tenant_id="11111111-1111-1111-1111-111111111111",
@@ -73,6 +99,9 @@ def record(name, hour=1, **fields):
                 recorded_at=paid_at,
                 payout_id="po_" + token,
                 created_at=created_at,
+                arrival_at=at.isoformat(),
+                fee_cents=0,
+                type="bank_account",
                 status="paid",
                 livemode=False,
                 currency="usd",
@@ -121,7 +150,48 @@ def bundle():
             host_org_id="22222222-2222-2222-2222-222222222222",
             enrolled_at="2026-10-12T01:00:00+00:00",
         ),
-        "test_credit_removed": record("retired", 9, path_disabled=True),
+        "test_credit_removed": record(
+            "retired", 9, recorded_at="2026-10-21T09:00:00+00:00", path_disabled=True
+        ),
+        "failed_bank_payout": record(
+            "failed-bank",
+            8,
+            status="failed",
+            type="bank_account",
+            started_at="2026-10-12T07:00:00+00:00",
+            livemode=False,
+            currency="usd",
+            payout_id="po_failed",
+            transfer_id="tr_failed",
+            account_id="acct_host",
+            bank_id="ba_failed",
+            amount_cents=100,
+            transfer_amount_cents=100,
+            failure_balance_transaction="txn_returned",
+            operator_visible=True,
+            tenant_id="11111111-1111-1111-1111-111111111111",
+            host_org_id="22222222-2222-2222-2222-222222222222",
+            lease_id="33333333-3333-3333-3333-333333333333",
+            billing_record_id="44444444-4444-4444-4444-444444444444",
+            preservation=record(
+                "preserved-bank",
+                8,
+                settled_host_payable_cents=100,
+                recoverable_after_cents=100,
+                bank_paid_cents=0,
+                lost_cents=0,
+                duplicate_debit_cents=0,
+                returned_cents=100,
+                currency="usd",
+                recovery_status="available",
+                payout_id="po_failed",
+                transfer_id="tr_failed",
+                tenant_id="11111111-1111-1111-1111-111111111111",
+                host_org_id="22222222-2222-2222-2222-222222222222",
+                lease_id="33333333-3333-3333-3333-333333333333",
+                billing_record_id="44444444-4444-4444-4444-444444444444",
+            ),
+        ),
         "boundary": record("boundary"),
         "closed_issues": sorted(checker.CLOSE_ISSUES),
         "closed_infra_issues": [222],
@@ -166,7 +236,7 @@ def bundle():
 
 def check(bundle, **changes):
     changes.setdefault("commit_time", COMMIT_TIME)
-    changes.setdefault("now", datetime(2026, 10, 12, 12, tzinfo=UTC))
+    changes.setdefault("now", datetime(2026, 10, 26, 12, tzinfo=UTC))
     return checker.check_evidence(
         bundle, source_revision=REVISION, exceptions=[], **changes
     )
@@ -332,14 +402,12 @@ def test_coherent_future_bundle_is_rejected(bundle):
             if isinstance(row, dict):
                 for key in ("recorded_at", "enrolled_at"):
                     if key in row:
-                        row[key] = (
-                            datetime.fromisoformat(row[key]) + timedelta(days=1)
-                        ).isoformat()
+                        row[key] = (datetime(2026, 10, 27, 12, tzinfo=UTC)).isoformat()
     assert any("in the future" in error for error in check(bundle))
 
 
 def test_future_clock_skew_is_bounded(bundle):
-    now = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    now = datetime(2026, 10, 26, 12, tzinfo=UTC)
     bundle["receipt"]["recorded_at"] = (now + checker.CLOCK_SKEW).isoformat()
     assert check(bundle, now=now) == []
     bundle["receipt"]["recorded_at"] = (
@@ -407,7 +475,7 @@ def test_evidence_url_accepts_dns_idna_and_ip_hosts(bundle, host):
 @pytest.mark.parametrize("key", ["failed_deposit", "repeated_mismatch"])
 @pytest.mark.parametrize("hour", [9, 10])
 def test_credit_retirement_follows_refusal_exercises(bundle, key, hour):
-    bundle[key]["recorded_at"] = f"2026-10-12T{hour:02}:00:00+00:00"
+    bundle[key]["recorded_at"] = f"2026-10-21T{hour:02}:00:00+00:00"
     assert any("removed after" in e for e in check(bundle))
 
 
@@ -586,6 +654,8 @@ def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
             deployed_at="2026-10-12T00:15:00+00:00",
         )
     )
+    assert check(bundle)
+    bundle["closed_issues"].append(491)
     assert check(bundle) == []
 
 
@@ -624,3 +694,137 @@ def test_rollout_recipient_must_match_journey_owner_binding(bundle):
     bundle["fiat_rollout"]["enrollments_before"][0]["stripe_account_id"] = "acct_other"
     bundle["fiat_rollout"]["enrollments_after"][0]["stripe_account_id"] = "acct_other"
     assert check(bundle)
+
+
+@pytest.mark.parametrize("status", ["failed", "canceled", "pending"])
+def test_paid_event_followed_by_bad_followup_cannot_accept(bundle, status):
+    bundle["gateway_runs"][0]["bank_followup"]["status"] = status
+    assert check(bundle)
+
+
+def test_paid_event_alone_is_not_bank_arrival_evidence(bundle):
+    run = bundle["gateway_runs"][0]
+    run["bank_followup"]["recorded_at"] = run["bank_payout"]["recorded_at"]
+    assert check(bundle)
+
+
+def test_later_failure_after_initial_paid_rejects(bundle):
+    bundle["gateway_runs"][0]["bank_followup"]["later_failure_seen"] = True
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["failed_bank_payout", "bank_followup", "settlement"])
+def test_extended_financial_evidence_is_required(bundle, key):
+    if key == "failed_bank_payout":
+        del bundle[key]
+    else:
+        del bundle["gateway_runs"][0][key]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("recoverable_after_cents", 1),
+        ("lost_cents", 1),
+        ("duplicate_debit_cents", 1),
+        ("bank_paid_cents", 100),
+        ("settled_host_payable_cents", 1),
+    ],
+)
+def test_failed_bank_must_preserve_all_earnings(bundle, field, value):
+    bundle["failed_bank_payout"]["preservation"][field] = value
+    assert check(bundle)
+
+
+def test_one_cent_transfer_and_bank_payout_cannot_accept_large_payable(bundle):
+    run = bundle["gateway_runs"][0]
+    run["connect_transfer"]["amount_cents"] = run["bank_payout"]["amount_cents"] = 1
+    assert check(bundle)
+
+
+def test_bank_amount_plus_documented_fee_must_reconcile(bundle):
+    payout = bundle["gateway_runs"][0]["bank_payout"]
+    payout["amount_cents"] = 99
+    assert check(bundle)
+    payout["fee_cents"] = 1
+    assert check(bundle)
+    payout["fee_evidence"] = record(
+        "fee",
+        2,
+        amount_cents=1,
+        currency="usd",
+        charged_to_host=True,
+        payout_id=payout["payout_id"],
+    )
+    assert check(bundle) == []
+
+
+def test_card_payout_is_not_a_bank_payout(bundle):
+    bundle["gateway_runs"][0]["bank_payout"]["type"] = "card"
+    assert check(bundle)
+
+
+def test_harmless_snapshot_fields_do_not_change_bindings(bundle):
+    bundle["fiat_rollout"]["enrollments_after"][0].update(
+        payout_method="fiat_bank", capability="active"
+    )
+    assert check(bundle) == []
+
+
+def test_stripe_execution_must_follow_fiat_rollout(bundle):
+    # Record timestamps alone can look post-rollout while execution predates it.
+    bundle["stripe_runs"][0]["started_at"] = "2026-10-12T00:25:00+00:00"
+    assert check(bundle)
+
+
+def test_bank_window_skips_weekends_and_federal_holidays():
+    friday = datetime(2026, 12, 18, 12, tzinfo=UTC)
+    assert checker.payout_observation_deadline(friday) == datetime(
+        2026, 12, 28, 12, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize("field", ["amount_cents", "transfer_amount_cents"])
+def test_failed_bank_amounts_must_match_preserved_payable(bundle, field):
+    bundle["failed_bank_payout"][field] = 1
+    assert check(bundle)
+
+
+def test_refund_credit_retirement_waits_for_bank_monitoring(bundle):
+    bundle["test_credit_removed"]["recorded_at"] = "2026-10-19T01:00:00+00:00"
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("events_complete", False),
+        ("additional_bank_closures_accounted_for", False),
+        ("events_from_at", "2026-10-12T02:00:00+00:00"),
+        ("events_through_at", "2026-10-13T00:00:00+00:00"),
+    ],
+)
+def test_incomplete_return_monitoring_rejects(bundle, key, value):
+    bundle["gateway_runs"][0]["bank_followup"][key] = value
+    assert check(bundle)
+
+
+def test_conditional_prerequisite_closure_is_required_separately(bundle):
+    bundle["gateway_runs"][0]["source_charge_type"] = "non_stablecoin"
+    bundle["fiat_rollout"]["prerequisites"].append(
+        record(
+            "source-change",
+            0,
+            recorded_at="2026-10-12T00:20:00+00:00",
+            repo="panopticon",
+            issue=491,
+            merged=True,
+            deployed=True,
+            merged_revision="b" * 40,
+            deployed_at="2026-10-12T00:15:00+00:00",
+        )
+    )
+    assert any("conditional #491" in error for error in check(bundle))
+    bundle["closed_issues"].append(491)
+    assert check(bundle) == []
