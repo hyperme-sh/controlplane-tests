@@ -100,7 +100,8 @@ def record(name, hour=1, **fields):
                 payout_id="po_" + token,
                 created_at=created_at,
                 arrival_at=at.isoformat(),
-                fee_cents=0,
+                platform_fee_cents=0,
+                host_deduction_cents=0,
                 type="bank_account",
                 status="paid",
                 livemode=False,
@@ -167,6 +168,17 @@ def bundle():
             bank_id="ba_failed",
             amount_cents=100,
             transfer_amount_cents=100,
+            failure_code="no_account",
+            bank_dispatch=record(
+                "bank-dispatch",
+                7,
+                payout_id="po_failed",
+                account_id="acct_host",
+                bank_id="ba_failed",
+                status="in_transit",
+                event_id="evt_dispatched",
+                livemode=False,
+            ),
             failure_balance_transaction="txn_returned",
             operator_visible=True,
             tenant_id="11111111-1111-1111-1111-111111111111",
@@ -743,21 +755,24 @@ def test_one_cent_transfer_and_bank_payout_cannot_accept_large_payable(bundle):
     assert check(bundle)
 
 
-def test_bank_amount_plus_documented_fee_must_reconcile(bundle):
+def test_platform_fees_cannot_reduce_the_host_bank_amount(bundle):
     payout = bundle["gateway_runs"][0]["bank_payout"]
     payout["amount_cents"] = 99
-    assert check(bundle)
-    payout["fee_cents"] = 1
-    assert check(bundle)
-    payout["fee_evidence"] = record(
+    payout["platform_fee_cents"] = 1
+    payout["platform_fee_evidence"] = record(
         "fee",
         2,
         amount_cents=1,
         currency="usd",
-        charged_to_host=True,
+        payer="platform",
+        charged_to_host=False,
         payout_id=payout["payout_id"],
     )
+    assert check(bundle)
+    payout["amount_cents"] = 100
     assert check(bundle) == []
+    payout["platform_fee_evidence"]["charged_to_host"] = True
+    assert check(bundle)
 
 
 def test_card_payout_is_not_a_bank_payout(bundle):
@@ -828,3 +843,42 @@ def test_conditional_prerequisite_closure_is_required_separately(bundle):
     assert any("conditional #491" in error for error in check(bundle))
     bundle["closed_issues"].append(491)
     assert check(bundle) == []
+
+
+@pytest.mark.parametrize("key", ["lease_id", "billing_record_id", "both"])
+def test_failed_exercise_cannot_reuse_paid_financial_scope(bundle, key):
+    paid = bundle["gateway_runs"][0]
+    failed = bundle["failed_bank_payout"]
+    for field in ("lease_id", "billing_record_id"):
+        if key in (field, "both"):
+            failed[field] = failed["preservation"][field] = paid[field]
+    assert any("distinct unpaid lease" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("status", ["canceled", "pending", "paid"])
+def test_failing_bank_requires_actual_rejection(bundle, status):
+    bundle["failed_bank_payout"]["status"] = status
+    assert check(bundle)
+
+
+def test_pre_dispatch_cancellation_cannot_count_as_bank_rejection(bundle):
+    failure = bundle["failed_bank_payout"]
+    failure["bank_dispatch"]["status"] = "pending"
+    assert check(bundle)
+    failure["bank_dispatch"]["status"] = "in_transit"
+    failure["failure_code"] = "insufficient_funds"
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("field", ["bank_dispatch", "failure_code"])
+def test_bank_dispatch_and_rejection_proof_are_required(bundle, field):
+    del bundle["failed_bank_payout"][field]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("value", [1, True])
+def test_host_fee_deduction_cannot_pass_even_with_full_declared_bank_amount(
+    bundle, value
+):
+    bundle["gateway_runs"][0]["bank_payout"]["host_deduction_cents"] = value
+    assert check(bundle)
