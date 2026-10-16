@@ -59,6 +59,8 @@ def _install_database(monkeypatch, versions, tables=()):
     monkeypatch.setattr(migrations, '_versions', lambda connection, root: dict(versions))
     monkeypatch.setattr(migrations, '_legacy_revision', lambda connection: None)
     monkeypatch.setattr(startup, 'inspect', lambda connection: _Inspector(tables))
+    # The concurrent index preflight has its own Postgres integration tests.
+    monkeypatch.setattr(migrations, 'prepare_pending_event_source_index', lambda url, root=None: False)
 
 
 def _record_upgrades(monkeypatch):
