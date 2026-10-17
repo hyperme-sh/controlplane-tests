@@ -316,9 +316,102 @@ def record(name, hour=1, **fields):
     return result
 
 
+def refusal_record(name, hour, *, mismatch=False):
+    at = datetime(2026, 10, 12, hour, tzinfo=UTC)
+    scope = {
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "host_org_id": "22222222-2222-2222-2222-222222222222",
+        "lease_id": str(uuid5(NAMESPACE_URL, "lease" + name)),
+        "billing_record_id": str(uuid5(NAMESPACE_URL, "billing" + name)),
+    }
+    token = uuid5(NAMESPACE_URL, name).hex
+    intent = {
+        "id": "pi_" + token,
+        "status": "succeeded" if mismatch else "requires_payment_method",
+        "livemode": False,
+        "currency": "usd",
+        "amount": 400,
+        "amount_received": 400 if mismatch else 0,
+        "latest_charge": "py_" + token if mismatch else None,
+        "last_payment_error": {"code": "payment_failed"},
+        "metadata": {
+            "tenant_id": scope["tenant_id"],
+            "billing_record_id": scope["billing_record_id"],
+            "payment_rail": "stripe_stablecoin",
+        },
+    }
+    row = record(
+        name,
+        hour,
+        **scope,
+        started_at=(at - timedelta(minutes=3)).isoformat(),
+        attempt_id="attempt-" + token,
+        payment_intent_id=intent["id"],
+        amount_cents=400,
+        no_lease_started=True,
+        actor_sub="sandbox-actor",
+        intent=intent,
+        provider_event={
+            "id": "evt_" + token,
+            "type": "payment_intent.succeeded"
+            if mismatch
+            else "payment_intent.payment_failed",
+            "livemode": False,
+            "created_at": (at - timedelta(seconds=90)).isoformat(),
+            "data": {"object": deepcopy(intent)},
+        },
+        no_start_audit=record(
+            "audit-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=10)).isoformat(),
+            **scope,
+            payment_intent_id=intent["id"],
+            attempt_id="attempt-" + token,
+            complete=True,
+            lease_started=False,
+            activation_count=0,
+            success_event_count=0,
+            window_start_at=(at - timedelta(seconds=120)).isoformat(),
+            window_end_at=(at - timedelta(seconds=20)).isoformat(),
+        ),
+    )
+    if mismatch:
+        row.update(
+            decision="quarantined",
+            charge={
+                "id": "py_" + token,
+                "payment_intent": intent["id"],
+                "status": "succeeded",
+                "paid": True,
+                "captured": True,
+                "amount": 400,
+                "currency": "usd",
+                "livemode": False,
+                "payment_method_details": {
+                    "type": "crypto",
+                    "crypto": {
+                        "network": "base",
+                        "token_currency": "usdc",
+                        "buyer_address": "0x" + "2" * 40,
+                    },
+                },
+            },
+            expected_payer=record(
+                "wallet-" + name,
+                hour,
+                recorded_at=(at - timedelta(minutes=4)).isoformat(),
+                tenant_id=scope["tenant_id"],
+                actor_sub="sandbox-actor",
+                source="auth_siwe_me",
+                address="0x" + "1" * 40,
+            ),
+        )
+    return row
+
+
 @pytest.fixture
 def bundle():
-    return {
+    result = {
         "schema_version": 2,
         "payout_method": "fiat_bank",
         "environment": "test",
@@ -445,6 +538,88 @@ def bundle():
             ],
         ),
     }
+    recovery = record("stripe-recovery", 8, short_balance=True, recovered=True)
+    for key in ("readiness", "bank_payout", "bank_followup", "bank_funding"):
+        recovery.pop(key, None)
+    scope = {
+        key: recovery[key]
+        for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+    }
+    refund = recovery["refund"]
+    transfer = recovery["connect_transfer"]
+    outcome = refund["transfer_outcome"]
+    outcome.pop("provider_reversal")
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        balance_transaction=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        reversal_refused=True,
+        reason="insufficient_connect_balance",
+        operator_visible=True,
+        financial_state="recorded",
+        refunded_from_platform_cents=100,
+        loss_record="billing-loss-checkpoint",
+    )
+    recovery["reversal_refusal"] = record(
+        "short-refusal",
+        8,
+        recorded_at="2026-10-12T07:59:53+00:00",
+        **scope,
+        transfer_id=transfer["id"],
+        refund_id=refund["refund_id"],
+        account_id=transfer["account_id"],
+        code="balance_insufficient",
+        request_id="req_shortbalance",
+        currency="usd",
+        livemode=False,
+        available_cents=0,
+        amount_cents=20,
+    )
+    transaction = {
+        "id": "txn_platformrefund",
+        "source": refund["refund_id"],
+        "amount": -100,
+        "net": -100,
+        "fee": 0,
+        "currency": "usd",
+        "type": "refund",
+    }
+    refund["inventory"]["data"][0]["balance_transaction"] = transaction["id"]
+    recovery["final_accounting"] = record(
+        "recovery-final",
+        8,
+        recorded_at="2026-10-12T07:59:59+00:00",
+        **scope,
+        refund_id=refund["refund_id"],
+        transfer_id=transfer["id"],
+        owner_checkpoint="billing-loss-checkpoint",
+        status="platform_loss_recorded",
+        renter_refunded_cents=100,
+        platform_loss_cents=20,
+        host_debited_cents=0,
+        currency="usd",
+        livemode=False,
+        refund_balance_transaction=transaction,
+    )
+    result["refund_recovery"] = recovery
+    result["failed_deposit"] = refusal_record("failed-deposit", 2)
+    result["repeated_mismatch"] = record(
+        "mismatch",
+        8,
+        no_lease_started=True,
+        tenant_id=scope["tenant_id"],
+        host_org_id=scope["host_org_id"],
+        actor_sub="sandbox-actor",
+        mismatch_count=3,
+        operator_required=True,
+        reason="repeated_mismatch",
+        attempts=[
+            refusal_record(f"mismatch-{i}", i + 2, mismatch=True) for i in range(3)
+        ],
+    )
+    return result
 
 
 def check(bundle, **changes):
@@ -1538,3 +1713,185 @@ def test_stablecoin_label_cannot_bypass_non_stablecoin_prerequisite(bundle, fiel
     else:
         payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
     assert any("stablecoin source requires provider rail" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key", ["refund_recovery", "failed_deposit", "repeated_mismatch"]
+)
+def test_boolean_only_exercises_cannot_pass(bundle, key):
+    original = bundle[key]
+    bundle[key] = {
+        k: original[k] for k in ("id", "revision", "url", "recorded_at", "passed")
+    }
+    bundle[key].update(short_balance=True, recovered=True, no_lease_started=True)
+    assert any(key in error for error in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "payment",
+        "settlement",
+        "connect_transfer",
+        "refund",
+        "reversal_refusal",
+        "final_accounting",
+    ],
+)
+def test_short_balance_recovery_requires_financial_records(bundle, key):
+    bundle["refund_recovery"].pop(key)
+    assert any("refund_recovery" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("code", "unrelated_error"),
+        ("amount_cents", 1),
+        ("available_cents", 20),
+        ("available_cents", True),
+        ("transfer_id", "tr_other"),
+        ("refund_id", "pyr_other"),
+        ("billing_record_id", "unrelated"),
+        ("request_id", None),
+        ("livemode", True),
+    ],
+)
+def test_short_balance_refusal_must_match_frozen_adjustment(bundle, field, value):
+    bundle["refund_recovery"]["reversal_refusal"][field] = value
+    assert any("balance_insufficient refusal" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("renter_refunded_cents", 1),
+        ("platform_loss_cents", 1),
+        ("host_debited_cents", 1),
+        ("owner_checkpoint", "unrelated"),
+        ("status", "planned"),
+        ("refund_id", "pyr_other"),
+        ("lease_id", "unrelated"),
+    ],
+)
+def test_recovery_final_checkpoint_requires_completed_full_refund(bundle, field, value):
+    bundle["refund_recovery"]["final_accounting"][field] = value
+    assert any("final owner checkpoint" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount", -1),
+        ("net", -1),
+        ("fee", 1),
+        ("source", "pyr_other"),
+        ("currency", "eur"),
+        ("id", "txn_other"),
+    ],
+)
+def test_recovery_balance_transaction_requires_exact_original_refund(
+    bundle, field, value
+):
+    bundle["refund_recovery"]["final_accounting"]["refund_balance_transaction"][
+        field
+    ] = value
+    assert any("refund_recovery" in e for e in check(bundle))
+
+
+def test_short_balance_recovery_cannot_reuse_a_successful_journey(bundle):
+    original = bundle["stripe_runs"][0]
+    bundle["refund_recovery"].update(
+        {key: original[key] for key in ("lease_id", "billing_record_id")}
+    )
+    assert any("requires distinct lease and billing" in e for e in check(bundle))
+
+
+def test_refusal_probes_cannot_reuse_recovery_payment(bundle):
+    bundle["failed_deposit"]["intent"]["id"] = bundle["refund_recovery"]["payment"][
+        "payment_intent_id"
+    ]
+    assert any("distinct provider pi attempt" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("complete", False),
+        ("activation_count", 1),
+        ("success_event_count", 1),
+        ("lease_started", True),
+        ("billing_record_id", "unrelated"),
+        ("payment_intent_id", "pi_other"),
+        ("attempt_id", "other"),
+    ],
+)
+def test_refusal_audit_must_be_complete_and_scope_bound(bundle, field, value):
+    bundle["failed_deposit"]["no_start_audit"][field] = value
+    assert any("complete owner no-start audit" in e for e in check(bundle))
+
+
+def test_refusal_audit_cannot_stop_before_minimum_window(bundle):
+    row = bundle["failed_deposit"]
+    row["no_start_audit"]["window_end_at"] = (
+        datetime.fromisoformat(row["provider_event"]["created_at"])
+        + timedelta(seconds=59)
+    ).isoformat()
+    assert any("at least 60 seconds" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "succeeded"),
+        ("amount_received", 400),
+        ("latest_charge", "py_captured"),
+        ("livemode", True),
+    ],
+)
+def test_failed_deposit_requires_provider_failure_without_capture(bundle, field, value):
+    bundle["failed_deposit"]["intent"][field] = value
+    assert any("failed_deposit" in e for e in check(bundle))
+
+
+def test_refusals_cannot_reuse_one_payment_attempt(bundle):
+    bundle["repeated_mismatch"]["attempts"][0] = deepcopy(bundle["failed_deposit"])
+    assert any("distinct provider" in e for e in check(bundle))
+
+
+def test_repeated_mismatch_cannot_replay_one_event_three_times(bundle):
+    repeated = bundle["repeated_mismatch"]
+    repeated["attempts"] = [deepcopy(repeated["attempts"][0]) for _ in range(3)]
+    assert any("distinct provider" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("mismatch_count", 2),
+        ("operator_required", False),
+        ("reason", "cooldown"),
+        ("actor_sub", "another-person"),
+    ],
+)
+def test_repeated_mismatch_requires_same_person_and_repeat_routing(
+    bundle, field, value
+):
+    bundle["repeated_mismatch"][field] = value
+    assert any("repeated_mismatch" in e for e in check(bundle))
+
+
+def test_matching_provider_payer_is_not_mismatch_evidence(bundle):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    row["charge"]["payment_method_details"]["crypto"]["buyer_address"] = row[
+        "expected_payer"
+    ]["address"]
+    assert any("captured provider payer mismatch" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key", ["expected_payer", "charge", "provider_event", "no_start_audit"]
+)
+def test_each_mismatch_requires_its_own_provider_and_owner_evidence(bundle, key):
+    bundle["repeated_mismatch"]["attempts"][1].pop(key)
+    assert any("repeated_mismatch" in e for e in check(bundle))
