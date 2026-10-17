@@ -512,6 +512,18 @@ def sync_bank_to_outcome(row):
             at - timedelta(seconds=5)
         ).isoformat()
         refund["inventory"]["data"][0]["created_at"] = refund["created_at"]
+        refund["discovery"] = record(
+            "refund-discovered-" + row["id"],
+            recorded_at=(at - timedelta(seconds=9)).isoformat(),
+            source="payment_refund_discovery",
+            **{
+                k: row[k]
+                for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+            },
+            payment_intent_id=row["payment"]["payment_intent_id"],
+            refund_idempotency_key=row["settlement"]["refund_idempotency_key"],
+            refund_due_cents=row["settlement"]["refund_due_cents"],
+        )
         empty_reversals(row)
     if reversed_host:
         reversal = outcome["provider_reversal"]
@@ -818,7 +830,7 @@ def refusal_record(name, hour, *, mismatch=False):
         )
     if mismatch:
         refund_id = "pyr_mismatch" + token
-        key = "hm-refund-mismatch-" + token
+        key = f"lease-settle-{scope['billing_record_id']}-400"
         charge_tx = {
             "id": "txn_mismatchcharge" + token,
             "source": row["charge"]["id"],
@@ -901,6 +913,42 @@ def refusal_record(name, hour, *, mismatch=False):
             refund_balance_transaction=refund_tx,
         )
     if mismatch:
+        approved = (at - timedelta(seconds=70)).isoformat()
+        checkpoint = row["final_accounting"]["owner_checkpoint"]
+        row["refund_approval"] = record(
+            "refund-approval-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=69)).isoformat(),
+            source="payment_mismatch_approval",
+            kind="operator",
+            approved_at=approved,
+            operator_required=False,
+            **scope,
+            payment_intent_id=intent["id"],
+            charge_id=row["charge"]["id"],
+            owner_checkpoint=checkpoint,
+        )
+        row["refund_plan"] = record(
+            "refund-plan-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=65)).isoformat(),
+            source="payment_refund_plan",
+            **scope,
+            owner_checkpoint=checkpoint,
+            plan={
+                "reserved_amount_cents": 400,
+                "refund_cents": 400,
+                "delivered_cents": 0,
+                "pass_stripe_amount": False,
+                "currency": "usd",
+                "stripe_payment_intent_id": intent["id"],
+                "stripe_charge_id": row["charge"]["id"],
+                "stripe_refund_id": None,
+                "idempotency_key": key,
+                "operator_approved_mismatch_at": approved,
+                "stripe_refund_attempted_at": (at - timedelta(seconds=66)).isoformat(),
+            },
+        )
         row["intent"].update(object="payment_intent")
         row["intent"]["metadata"].update(
             lease_id=scope["lease_id"], payment_flow="deposit"
@@ -4623,3 +4671,186 @@ def test_transfer_inventory_must_preserve_provider_balance_source_type(bundle):
         "bank_account"
     )
     assert any("exactly one provider transfer" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("code", list(range(32)) + [127])
+def test_simulation_return_url_rejects_native_nonprintable_ascii(bundle, code):
+    binding = authorize_simulated_fixture(bundle["stripe_runs"][0])
+    binding["return_url"] = "https://example.org/" + chr(code)
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("stripe_transfers", "restricted"),
+        ("stripe_transfers", None),
+        ("payouts_enabled", False),
+        ("payout_requirements_clear", False),
+        ("destination_requirements_clear", False),
+        ("ownership_verified", False),
+        ("account_id", "acct_other"),
+    ],
+)
+def test_standalone_recovery_cannot_dispatch_without_active_owner_bound_readiness(
+    bundle, field, value
+):
+    bundle["refund_recovery"]["readiness"][field] = value
+    assert any("readiness" in e or "recipient account" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "legal_type,state,valid",
+    [
+        ("individual", "CA", True),
+        ("sole_proprietor", "TX", True),
+        ("company", "CA", False),
+        ("individual", "NY", False),
+        ("individual", "HI", False),
+        ("individual", "ZZ", False),
+    ],
+)
+def test_connect_profiles_follow_current_native_eligibility_until_490_changes_owner_guard(
+    bundle, legal_type, state, valid
+):
+    row = bundle["gateway_runs"][0]
+    profile = {"legal_type": legal_type, "country": "US", "state": state}
+    row["readiness"]["recipient_profile"] = profile
+    for stage in ("prepared", "dispatching", "succeeded"):
+        row["connect_dispatch"][stage]["state"]["profile"] = profile.copy()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("immutable attempt/profile" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field", ["refund_approval", "refund_plan"])
+def test_captured_mismatch_cannot_refund_by_direct_provider_call_without_owner_authority(
+    bundle, field
+):
+    bundle["repeated_mismatch"]["attempts"][2].pop(field)
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "provider_refund"),
+        ("kind", "unknown"),
+        ("operator_required", True),
+        ("payment_intent_id", "pi_other"),
+        ("owner_checkpoint", "other"),
+        ("approved_at", "2026-10-12T04:00:00+00:00"),
+    ],
+)
+def test_mismatch_refund_approval_is_bound_server_provenance(bundle, field, value):
+    bundle["repeated_mismatch"]["attempts"][0]["refund_approval"][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("index,valid", [(0, True), (2, False)])
+def test_repeat_threshold_forbids_automatic_refund_approval(bundle, index, valid):
+    row = bundle["repeated_mismatch"]["attempts"][index]
+    row["refund_approval"].update(
+        kind="automatic", eligible=True, reason="eligible_pending_fee_accounting"
+    )
+    plan = row["refund_plan"]["plan"]
+    plan["automatic_approved_mismatch_at"] = plan.pop("operator_approved_mismatch_at")
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("repeated threshold requires operator" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reserved_amount_cents", 399),
+        ("refund_cents", 399),
+        ("delivered_cents", 1),
+        ("delivered_cents", False),
+        ("pass_stripe_amount", True),
+        ("currency", "eur"),
+        ("stripe_payment_intent_id", "pi_other"),
+        ("stripe_charge_id", "ch_other"),
+        ("idempotency_key", "manual-refund"),
+        ("operator_approved_mismatch_at", None),
+        ("stripe_refund_id", "re_already"),
+    ],
+)
+def test_full_mismatch_refund_plan_is_immutable_before_provider_io(
+    bundle, field, value
+):
+    bundle["repeated_mismatch"]["attempts"][2]["refund_plan"]["plan"][field] = value
+    assert any("full native refund plan" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_platform_loss_cannot_be_manufactured_by_paying_after_known_refund(
+    bundle, offset
+):
+    row = bundle["stripe_runs"][0]
+    outcome = row["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        balance_transaction=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        operator_visible=True,
+        financial_state="recorded",
+        reason="insufficient_connect_balance",
+        reversal_refused=True,
+        refunded_from_platform_cents=100,
+        loss_record="recorded-owner-loss",
+        owner_checkpoint="loss-checkpoint",
+        recovery_status="complete",
+    )
+    outcome["provider_refusal"] = loss_provider_error(outcome)
+    sync_bank_to_outcome(row)
+    paid = datetime.fromisoformat(row["bank_payout"]["recorded_at"])
+    row["refund"]["discovery"]["recorded_at"] = (
+        paid + timedelta(seconds=offset)
+    ).isoformat()
+    if offset > 0:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "must already be paid before refund discovery" in e for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize(
+    "suffix_length,valid", [(199, True), (200, True), (201, False), (500, False)]
+)
+def test_complete_payment_id_binding_obeys_native_suffix_bounds(
+    bundle, suffix_length, valid
+):
+    row = bundle["gateway_runs"][0]
+    original = row["payment"]["payment_intent_id"]
+    replace_tax_revision_everywhere(row, original, "pi_" + "x" * suffix_length)
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("captured USD sandbox payment" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("prefix", ["ch", "py", "re", "pyr"])
+@pytest.mark.parametrize("length,valid", [(200, True), (201, False)])
+def test_charge_and_refund_id_alphabets_and_bounds_match_native_adapters(
+    bundle, prefix, length, valid
+):
+    row = bundle["stripe_runs"][1]
+    original = (
+        row["payment"]["charge_id"]
+        if prefix in ("ch", "py")
+        else row["refund"]["refund_id"]
+    )
+    replace_tax_revision_everywhere(
+        row, original, prefix + "_" + "a_" * (length // 2) + "a" * (length % 2)
+    )
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert check(bundle)
