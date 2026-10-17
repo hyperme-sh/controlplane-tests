@@ -452,6 +452,20 @@ def record(name, hour=1, **fields):
         payment["intent"]["metadata"].update(
             {k: payment[k] for k in ("tax_revision_id", "tax_calculation_id")}
         )
+        payment.update(
+            subtotal_cents=400,
+            tax_payable={
+                "version": 1,
+                "revision_id": payment["tax_revision_id"],
+                "calculation_id": payment["tax_calculation_id"],
+                "subtotal_cents": 400,
+                "tax_cents": 0,
+                "total_cents": 400,
+                "policy_version": "EXAMPLE-tax-1",
+                "tax_code": "txcd_10000000",
+                "expires_at": int(at.timestamp()),
+            },
+        )
         payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     if name.startswith("stripe-"):
         sync_bank_to_outcome(result)
@@ -787,7 +801,7 @@ def bundle():
         "repeated_mismatch": record("mismatch", no_lease_started=True),
         "receipt": record(
             "receipt",
-            tax_version="tax-1",
+            tax_version="EXAMPLE-tax-1",
             ruleset_version="rules-1",
             throughput_map_version="map-1",
         ),
@@ -3041,13 +3055,21 @@ def test_empty_fee_report_does_not_establish_zero_cost(bundle):
     assert any("empty report is not zero-cost proof" in e for e in check(bundle))
 
 
-def test_owner_authorized_simulation_marker_can_certify_sandbox_capture(bundle):
+def authorize_simulated_fixture(row):
     from phase_b_capture_contract import SANDBOX_SUCCESS_MARKER
 
-    row = bundle["stripe_runs"][0]
     payment = row["payment"]
     at = datetime.fromisoformat(row["recorded_at"])
     binding = {
+        "version": 1,
+        "tenant_id": row["tenant_id"],
+        "billing_record_id": row["billing_record_id"],
+        "lease_id": row["lease_id"],
+        "wallet": payment["payer_snapshot"]["address"],
+        "amount_cents": payment["amount_cents"],
+        "subtotal_cents": payment["subtotal_cents"],
+        "tax_payable": deepcopy(payment["tax_payable"]),
+        "return_url": "https://example.org/return",
         "actor_sub": payment["actor_sub"],
         "operation_id": "55555555-5555-5555-5555-555555555555",
         "intent_id": payment["payment_intent_id"],
@@ -3075,6 +3097,13 @@ def test_owner_authorized_simulation_marker_can_certify_sandbox_capture(bundle):
     payment["charge"]["payment_method_details"]["crypto"]["transaction_hash"] = (
         SANDBOX_SUCCESS_MARKER
     )
+    return binding
+
+
+def test_owner_authorized_simulation_marker_can_certify_sandbox_capture(bundle):
+
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
     assert check(bundle) == []
     binding["simulation"]["billing_record_id"] = "wrong"
     assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
@@ -3343,3 +3372,89 @@ def test_copied_placeholder_receipt_versions_are_not_provenance(bundle, field, v
     )
     artifact["policy_version" if field == "tax_version" else field] = value
     assert any("placeholder/non-frozen version" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tenant_id", "other"),
+        ("host_org_id", "other"),
+        ("lease_id", "other"),
+        ("billing_record_id", "other"),
+        ("currency", "eur"),
+        ("host_payable_cents", 1),
+        ("host_payable_cents", True),
+        ("recorded_at", "2026-10-13T08:00:00+00:00"),
+    ],
+)
+def test_failed_bank_requires_authoritative_settlement_before_dispatch(
+    bundle, field, value
+):
+    bundle["failed_bank_payout"]["settlement"][field] = value
+    assert any(
+        "settled host payable" in e or "settlement must precede" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "garbage-but-not-placeholder",
+        "EXAMPLE-",
+        "EXAMPLE-" + "a" * 65,
+        "example-v1",
+        "EXAMPLE-invalid.space",
+    ],
+)
+def test_tax_receipt_uses_native_persisted_policy_format(bundle, value):
+    receipt = bundle["receipt"]
+    receipt["tax_version"] = receipt["owner_artifact"]["tax_version"] = receipt[
+        "frozen_tax_calculation"
+    ]["policy_version"] = value
+    assert any("missing tax_version" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "version",
+        "tenant_id",
+        "billing_record_id",
+        "lease_id",
+        "wallet",
+        "subtotal_cents",
+        "amount_cents",
+        "tax_payable",
+        "return_url",
+    ],
+)
+def test_simulated_capture_requires_the_complete_frozen_owner_order(bundle, field):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    assert check(bundle) == []
+    binding.pop(field)
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("version", 2),
+        ("tenant_id", "other"),
+        ("billing_record_id", "other"),
+        ("lease_id", "other"),
+        ("wallet", "0x" + "2" * 40),
+        ("subtotal_cents", 1),
+        ("amount_cents", 1),
+        ("tax_payable", None),
+        ("return_url", "http://example.org/return"),
+    ],
+)
+def test_simulation_outer_binding_must_match_authoritative_payment(
+    bundle, field, value
+):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    binding[field] = value
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
