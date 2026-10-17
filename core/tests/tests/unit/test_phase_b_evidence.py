@@ -3989,3 +3989,89 @@ def test_receipt_tax_policy_is_the_same_frozen_quote_that_funded_capture(bundle,
     else:
         paid["tax_payable"]["policy_version"] = "EXAMPLE-different-valid-policy"
     assert any("original frozen payable policy" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "revision,calculation",
+    [
+        (None, None),
+        (None, "taxcalc_present"),
+        ("88888888-8888-8888-8888-888888888888", None),
+        ("invalid", "taxcalc_present"),
+        ("88888888-8888-8888-8888-888888888888", "invalid"),
+    ],
+)
+def test_non_null_payable_cannot_claim_an_untaxed_or_invalid_deposit_order(
+    bundle, revision, calculation
+):
+    paid = bundle["gateway_runs"][0]["payment"]
+    paid.update(tax_revision_id=revision, tax_calculation_id=calculation)
+    paid["tax_payable"].update(revision_id=revision, calculation_id=calculation)
+    metadata = paid["intent"]["metadata"]
+    for field in ("tax_revision_id", "tax_calculation_id"):
+        metadata.pop(field)
+    if revision is not None or calculation is not None:
+        metadata.update(tax_revision_id=revision, tax_calculation_id=calculation)
+    paid["capture_event"]["data"]["object"] = deepcopy(paid["intent"])
+    assert any("non-null frozen tax payable" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("amount", [400, 401, 500])
+def test_fully_reconciled_gateway_cannot_transfer_more_than_original_capture(
+    bundle, amount
+):
+    row = bundle["gateway_runs"][0]
+    row["settlement"]["host_payable_cents"] = row["connect_transfer"][
+        "amount_cents"
+    ] = row["bank_payout"]["amount_cents"] = amount
+    row["transfer_inventory"]["data"][0]["amount"] = amount
+    row["bank_funding"]["transactions"][0].update(amount=amount, net=amount)
+    row["bank_funding"]["transactions"][1].update(amount=-amount, net=-amount)
+    bind_bank_dispatch(row, row["bank_payout"])
+    if amount <= 400:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "cannot exceed the authoritative captured charge" in e
+            for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_next_mismatch_checkout_respects_prior_persisted_cooldown_boundary(
+    bundle, delta
+):
+    first, second = bundle["repeated_mismatch"]["attempts"][:2]
+    previous = datetime.fromisoformat(first["policy_observation"]["recorded_at"])
+    start = previous + timedelta(minutes=15, microseconds=delta)
+    second["started_at"] = start.isoformat()
+    second["expected_payer"]["recorded_at"] = (start - timedelta(minutes=1)).isoformat()
+    if delta < 0:
+        assert any("15-minute mismatch cooldown" in e for e in check(bundle))
+    else:
+        assert check(bundle) == []
+
+
+@pytest.mark.parametrize("age", [timedelta(hours=23), timedelta(days=10000)])
+def test_simulation_marker_rejects_creation_attempt_expired_at_original_checkout(
+    bundle, age
+):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    checkout = datetime.fromisoformat(row["payment"]["checkout_created_at"])
+    binding["attempted_at"] = (checkout - age).isoformat()
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("length,valid", [(64, True), (65, False), (128, False)])
+def test_receipt_ruleset_version_uses_native_persisted_64_character_limit(
+    bundle, length, valid
+):
+    receipt = bundle["receipt"]
+    receipt["ruleset_version"] = receipt["owner_artifact"]["ruleset_version"] = receipt[
+        "frozen_lease"
+    ]["ruleset_version"] = "r" * length
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("missing ruleset_version" in e for e in check(bundle))
