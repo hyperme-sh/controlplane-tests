@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -92,6 +93,8 @@ def record(name, hour=1, **fields):
                 "currency": "usd",
                 "livemode": False,
                 "account_id": "acct_host",
+                "destination": "acct_host",
+                "destination_payment": "py_destination" + token,
             },
             bank_payout=record(
                 "paid-" + name,
@@ -100,6 +103,7 @@ def record(name, hour=1, **fields):
                 payout_id="po_" + token,
                 created_at=created_at,
                 arrival_at=at.isoformat(),
+                balance_transaction="txn_debit" + token,
                 platform_fee_cents=0,
                 host_deduction_cents=0,
                 type="bank_account",
@@ -111,6 +115,68 @@ def record(name, hour=1, **fields):
                 bank_id="ba_host",
                 transfer_id="tr_" + token,
             ),
+        )
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        opening_at = (at - timedelta(seconds=90)).isoformat()
+        closing_at = (at - timedelta(seconds=20)).isoformat()
+        result["bank_funding"] = record(
+            "funding-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=15)).isoformat(),
+            account_id="acct_host",
+            currency="usd",
+            livemode=False,
+            transactions_complete=True,
+            has_more=False,
+            window_start_at=opening_at,
+            window_end_at=closing_at,
+            opening_balance=record(
+                "opening-" + name,
+                hour,
+                recorded_at=opening_at,
+                account_id="acct_host",
+                currency="usd",
+                livemode=False,
+                available_cents=0,
+                pending_cents=0,
+                reserved_cents=0,
+            ),
+            closing_balance=record(
+                "closing-" + name,
+                hour,
+                recorded_at=closing_at,
+                account_id="acct_host",
+                currency="usd",
+                livemode=False,
+                available_cents=0,
+                pending_cents=0,
+                reserved_cents=0,
+            ),
+            transactions=[
+                {
+                    "id": "txn_credit" + token,
+                    "source": "py_destination" + token,
+                    "type": "payment",
+                    "currency": "usd",
+                    "amount": 100,
+                    "fee": 0,
+                    "net": 100,
+                    "status": "available",
+                    "created_at": transfer_at,
+                    "available_at": transfer_at,
+                },
+                {
+                    "id": "txn_debit" + token,
+                    "source": "po_" + token,
+                    "type": "payout",
+                    "currency": "usd",
+                    "amount": -100,
+                    "fee": 0,
+                    "net": -100,
+                    "status": "available",
+                    "created_at": created_at,
+                },
+            ],
         )
     if name.startswith("stripe-"):
         scope = {
@@ -139,6 +205,7 @@ def record(name, hour=1, **fields):
                 "amount_received": 400,
                 "latest_charge": charge_id,
                 "metadata": {
+                    "payment_rail": "stripe_stablecoin",
                     "tenant_id": scope["tenant_id"],
                     "billing_record_id": scope["billing_record_id"],
                 },
@@ -152,8 +219,27 @@ def record(name, hour=1, **fields):
                 "livemode": False,
                 "currency": "usd",
                 "amount": 400,
+                "payment_method_details": {"type": "crypto", "crypto": {}},
             },
         )
+        result["payment"].update(
+            checkout_created_at=(at - timedelta(seconds=240)).isoformat(),
+            dispatch_checkpoint=record(
+                "dispatch-" + name,
+                hour,
+                recorded_at=(at - timedelta(seconds=250)).isoformat(),
+                **scope,
+                connect_transfer_enabled=True,
+            ),
+            capture_event={
+                "id": "evt_" + token,
+                "type": "payment_intent.succeeded",
+                "livemode": False,
+                "created_at": (at - timedelta(seconds=190)).isoformat(),
+                "data": {"object": deepcopy(result["payment"]["intent"])},
+            },
+        )
+        result["connect_transfer"]["metadata"] = scope.copy()
         result["connect_transfer"]["source_transaction"] = charge_id
         result["settlement"].update(
             captured_cents=400,
@@ -199,6 +285,34 @@ def record(name, hour=1, **fields):
                 livemode=False,
             ),
         )
+        result["refund"]["inventory"] = record(
+            "inventory-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=3)).isoformat(),
+            payment_intent_id=payment_id,
+            complete=True,
+            has_more=False,
+            data=[
+                {
+                    "id": refund_id,
+                    "payment_intent": payment_id,
+                    "charge": charge_id,
+                    "amount": 100,
+                    "status": "succeeded",
+                    "currency": "usd",
+                    "livemode": False,
+                    "metadata": deepcopy(result["refund"]["metadata"]),
+                }
+            ],
+        )
+        result["refund"]["transfer_outcome"]["provider_reversal"] = {
+            "id": "trr_" + token,
+            "transfer": "tr_" + token,
+            "amount": 20,
+            "currency": "usd",
+            "balance_transaction": "txn_" + token,
+            "metadata": scope | {"reversal_target_cents": "20"},
+        }
     return result
 
 
@@ -739,6 +853,10 @@ def test_rollout_cannot_replace_existing_enrollment(bundle, key):
 
 def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
     bundle["stripe_runs"][0]["source_charge_type"] = "non_stablecoin"
+    payment = bundle["stripe_runs"][0]["payment"]
+    payment["intent"]["metadata"]["payment_rail"] = "stripe_checkout"
+    payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     assert check(bundle)
     bundle["fiat_rollout"]["prerequisites"].append(
         record(
@@ -1093,6 +1211,12 @@ def test_supported_original_charge_and_refund_ids_pass(
     row["connect_transfer"]["source_transaction"] = row["payment"]["charge_id"]
     row["refund"]["refund_id"] = refund_prefix + "_supported"
     row["refund"]["transfer_outcome"]["refund_id"] = row["refund"]["refund_id"]
+    row["payment"]["capture_event"]["data"]["object"] = deepcopy(
+        row["payment"]["intent"]
+    )
+    row["refund"]["inventory"]["data"][0].update(
+        id=row["refund"]["refund_id"], charge=row["payment"]["charge_id"]
+    )
     assert check(bundle) == []
 
 
@@ -1220,3 +1344,197 @@ def test_loss_outcome_cannot_preserve_reversal_balance_transaction(bundle):
         loss_record="owner-loss",
     )
     assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["bank_funding"])
+def test_bank_payout_needs_provider_funding_chain_not_a_copied_transfer_id(bundle, key):
+    del bundle["gateway_runs"][0][key]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "py_unrelated"),
+        ("amount", 99),
+        ("net", 99),
+        ("fee", 1),
+        ("status", "pending"),
+    ],
+)
+def test_unrelated_or_incomplete_destination_credit_cannot_fund_journey(
+    bundle, field, value
+):
+    bundle["gateway_runs"][0]["bank_funding"]["transactions"][0][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", "txn_unrelated"),
+        ("source", "po_unrelated"),
+        ("amount", -1),
+        ("net", -1),
+        ("type", "transfer"),
+    ],
+)
+def test_payout_debit_must_match_provider_payout_and_amount(bundle, field, value):
+    bundle["gateway_runs"][0]["bank_funding"]["transactions"][1][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["available_cents", "pending_cents", "reserved_cents"])
+def test_preexisting_connected_balance_cannot_stand_in_for_journey_credit(bundle, key):
+    bundle["gateway_runs"][0]["bank_funding"]["opening_balance"][key] = 100
+    assert check(bundle)
+
+
+def test_unrelated_intervening_activity_and_incomplete_inventory_reject(bundle):
+    funding = bundle["gateway_runs"][0]["bank_funding"]
+    funding["transactions_complete"] = False
+    assert check(bundle)
+    funding["transactions_complete"] = True
+    funding["has_more"] = True
+    assert check(bundle)
+    funding["has_more"] = False
+    funding["transactions"].append(dict(funding["transactions"][0], id="txn_other"))
+    assert check(bundle)
+
+
+def test_cloning_successful_stripe_journey_does_not_count_as_three_runs(bundle):
+    from copy import deepcopy
+
+    original = bundle["stripe_runs"][0]
+    copies = [deepcopy(original) for _ in range(3)]
+
+    def rename(value, suffix):
+        if isinstance(value, dict):
+            # Rename evidence IDs only, leaving provider IDs and financial scope.
+            if "url" in value and "recorded_at" in value:
+                value["id"] += suffix
+            for child in value.values():
+                rename(child, suffix)
+        elif isinstance(value, list):
+            for child in value:
+                rename(child, suffix)
+
+    for i, row in enumerate(copies):
+        rename(row, f"-copy-{i}")
+        row["recorded_at"] = f"2026-10-12T0{5 + i}:00:00+00:00"
+    bundle["stripe_runs"] = copies
+    errors = check(bundle)
+    assert any("distinct lease_id within stripe_runs" in e for e in errors)
+    assert any("distinct billing_record_id within stripe_runs" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("id", "evt_other"), ("type", "payment_intent.processing"), ("livemode", True)],
+)
+def test_capture_event_requires_provider_success(bundle, field, value):
+    event = bundle["stripe_runs"][0]["payment"]["capture_event"]
+    event[field] = value
+    if field == "id":
+        event["data"]["object"]["id"] = "pi_other"
+    assert any("provider succeeded event" in e for e in check(bundle))
+
+
+def test_old_capture_reread_is_not_a_fresh_journey(bundle):
+    row = bundle["stripe_runs"][0]
+    row["payment"]["capture_event"]["created_at"] = (
+        datetime.fromisoformat(row["started_at"]) - timedelta(seconds=1)
+    ).isoformat()
+    assert any("provider capture and observation" in e for e in check(bundle))
+
+
+def test_recovery_cannot_precede_provider_refund(bundle):
+    row = bundle["stripe_runs"][0]
+    row["refund"]["transfer_outcome"]["recorded_at"] = (
+        datetime.fromisoformat(row["refund"]["created_at"]) - timedelta(seconds=1)
+    ).isoformat()
+    assert any("outcome must follow provider refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("connect_transfer_enabled", False),
+        ("connect_transfer_enabled", None),
+        ("tenant_id", "unrelated"),
+        ("recorded_at", "2026-10-12T02:59:59+00:00"),
+    ],
+)
+def test_frozen_dispatch_checkpoint_required_before_checkout(bundle, field, value):
+    row = bundle["stripe_runs"][0]
+    checkpoint = row["payment"]["dispatch_checkpoint"]
+    if field == "recorded_at":
+        value = row["payment"]["recorded_at"]
+    checkpoint[field] = value
+    assert any("dispatch" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value", [("metadata", {}), ("destination", "acct_other")]
+)
+def test_transfer_provider_scope_cannot_be_declared_by_bundle(bundle, field, value):
+    bundle["stripe_runs"][0]["connect_transfer"][field] = value
+    assert any("provider transfer must match frozen" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("transfer", "tr_other"),
+        ("amount", 1),
+        ("amount", True),
+        ("currency", "eur"),
+        ("id", "trr_other"),
+        ("balance_transaction", "txn_other"),
+        ("metadata", {}),
+        ("metadata", {"reversal_target_cents": "20"}),
+    ],
+)
+def test_reversal_requires_provider_binding(bundle, field, value):
+    bundle["stripe_runs"][0]["refund"]["transfer_outcome"]["provider_reversal"][
+        field
+    ] = value
+    assert any("provider reversal must match" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("complete", False),
+        ("has_more", True),
+        ("data", []),
+        ("payment_intent_id", "pi_other"),
+    ],
+)
+def test_refund_requires_complete_inventory(bundle, field, value):
+    bundle["stripe_runs"][0]["refund"]["inventory"][field] = value
+    assert any("refund" in e for e in check(bundle))
+
+
+def test_duplicate_frozen_refunds_fail_even_with_unique_provider_ids(bundle):
+    inventory = bundle["stripe_runs"][0]["refund"]["inventory"]
+    duplicate = deepcopy(inventory["data"][0])
+    duplicate["id"] = "pyr_duplicate"
+    inventory["data"].append(duplicate)
+    assert any("exactly one provider refund" in e for e in check(bundle))
+
+
+def test_refund_inventory_cannot_substitute_another_result(bundle):
+    bundle["stripe_runs"][0]["refund"]["inventory"]["data"][0]["amount"] = 1
+    assert any("exactly one provider refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field", ["rail", "crypto"])
+def test_stablecoin_label_cannot_bypass_non_stablecoin_prerequisite(bundle, field):
+    payment = bundle["stripe_runs"][0]["payment"]
+    if field == "rail":
+        payment["intent"]["metadata"].pop("payment_rail")
+        payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    else:
+        payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    assert any("stablecoin source requires provider rail" in e for e in check(bundle))
