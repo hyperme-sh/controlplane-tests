@@ -333,6 +333,71 @@ def record(name, hour=1, **fields):
             has_more=False,
             data=[deepcopy(outcome["provider_reversal"])],
         )
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        scope = {
+            k: result[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        }
+        transfer = result["connect_transfer"]
+        transfer.setdefault("source_transaction", "py_source" + token)
+        provider = deepcopy(transfer)
+        provider["amount"] = provider.pop("amount_cents")
+        result["transfer_inventory"] = record(
+            "transfers-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=1)).isoformat(),
+            destination=transfer["account_id"],
+            complete=True,
+            has_more=False,
+            data=[provider],
+        )
+        controls_at = at - timedelta(seconds=120)
+        result["readiness"]["payout_controls"] = record(
+            "controls-" + name,
+            hour,
+            recorded_at=controls_at.isoformat(),
+            tenant_id=scope["tenant_id"],
+            host_org_id=scope["host_org_id"],
+            account_id=transfer["account_id"],
+            livemode=False,
+            schedule_interval="manual",
+            host_standard_payouts=False,
+            host_instant_payouts=False,
+            host_schedule_editing=False,
+            host_probes=[
+                record(
+                    "probe-" + operation + "-" + name,
+                    hour,
+                    recorded_at=(controls_at - timedelta(seconds=10)).isoformat(),
+                    tenant_id=scope["tenant_id"],
+                    host_org_id=scope["host_org_id"],
+                    account_id=transfer["account_id"],
+                    livemode=False,
+                    actor_sub="sandbox-host-owner",
+                    actor_role="host",
+                    operation=operation,
+                    allowed=False,
+                    http_status=403,
+                )
+                for operation in ("standard_payout", "instant_payout", "schedule_edit")
+            ],
+        )
+    if name.startswith("stripe-"):
+        payment = result["payment"]
+        payment["actor_sub"] = "sandbox-renter"
+        payment["charge"].update(amount_refunded=0, refunded=False)
+        payment["charge"]["payment_method_details"]["crypto"]["buyer_address"] = (
+            "0x" + "1" * 40
+        )
+        payment["payer_snapshot"] = record(
+            "payer-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=260)).isoformat(),
+            source="auth_siwe_me",
+            tenant_id=scope["tenant_id"],
+            actor_sub="sandbox-renter",
+            address="0x" + "1" * 40,
+        )
     return result
 
 
@@ -559,7 +624,7 @@ def bundle():
         ),
     }
     recovery = record("stripe-recovery", 8, short_balance=True, recovered=True)
-    for key in ("readiness", "bank_payout", "bank_followup", "bank_funding"):
+    for key in ("bank_payout", "bank_followup", "bank_funding"):
         recovery.pop(key, None)
     scope = {
         key: recovery[key]
@@ -641,6 +706,47 @@ def bundle():
             refusal_record(f"mismatch-{i}", i + 2, mismatch=True) for i in range(3)
         ],
     )
+    failure = result["failed_bank_payout"]
+    synthetic = record("ok-failed-bank", 8)
+    failure_scope = {
+        k: failure[k]
+        for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+    }
+    transfer = synthetic["connect_transfer"]
+    transfer.update(id=failure["transfer_id"], metadata=failure_scope)
+    failure["connect_transfer"] = transfer
+    failure["readiness"] = synthetic["readiness"]
+    failure["transfer_inventory"] = synthetic["transfer_inventory"]
+    failure["transfer_inventory"]["data"][0].update(
+        id=transfer["id"], metadata=failure_scope
+    )
+    failure["created_at"] = synthetic["bank_payout"]["created_at"]
+    failure["balance_transaction"] = synthetic["bank_payout"]["balance_transaction"]
+    failure["bank_dispatch"]["recorded_at"] = "2026-10-12T07:59:35+00:00"
+    funding = synthetic["bank_funding"]
+    funding["closing_balance"].update(
+        recorded_at="2026-10-12T07:59:50+00:00", available_cents=100
+    )
+    funding.update(
+        recorded_at="2026-10-12T07:59:55+00:00",
+        window_end_at=funding["closing_balance"]["recorded_at"],
+    )
+    funding["transactions"][1]["source"] = failure["payout_id"]
+    funding["transactions"].append(
+        {
+            "id": failure["failure_balance_transaction"],
+            "source": failure["payout_id"],
+            "type": "payout_failure",
+            "currency": "usd",
+            "status": "available",
+            "amount": 100,
+            "fee": 0,
+            "net": 100,
+            "created_at": "2026-10-12T07:59:40+00:00",
+            "available_at": "2026-10-12T07:59:42+00:00",
+        }
+    )
+    failure["bank_funding"] = funding
     return result
 
 
@@ -1410,6 +1516,9 @@ def test_supported_original_charge_and_refund_ids_pass(
         "payment"
     ]["charge_id"]
     row["connect_transfer"]["source_transaction"] = row["payment"]["charge_id"]
+    row["transfer_inventory"]["data"][0]["source_transaction"] = row["payment"][
+        "charge_id"
+    ]
     row["refund"]["refund_id"] = refund_prefix + "_supported"
     row["refund"]["transfer_outcome"]["refund_id"] = row["refund"]["refund_id"]
     row["payment"]["capture_event"]["data"]["object"] = deepcopy(
@@ -2015,3 +2124,168 @@ def test_unrelated_provider_reversal_cannot_hide_extra_host_debit(bundle):
         "unrelated reversal requires settlement reconciliation" in e
         for e in check(bundle)
     )
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "refund_recovery"])
+def test_provider_duplicate_transfers_cannot_hide_outside_payout_window(bundle, group):
+    run = bundle[group][0] if isinstance(bundle[group], list) else bundle[group]
+    inventory = run["transfer_inventory"]
+    duplicate = deepcopy(inventory["data"][0])
+    duplicate["id"] = "tr_duplicate"
+    inventory["data"].append(duplicate)
+    assert any("exactly one provider transfer" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("complete", False),
+        ("has_more", True),
+        ("destination", "acct_wrong"),
+        ("data", []),
+    ],
+)
+def test_transfer_inventory_must_cover_all_destination_pages(bundle, key, value):
+    bundle["gateway_runs"][0]["transfer_inventory"][key] = value
+    assert any("transfer" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("amount_refunded", 400),
+        ("amount_refunded", True),
+        ("amount_refunded", None),
+        ("refunded", True),
+        ("refunded", None),
+    ],
+)
+def test_pre_settlement_capture_requires_an_unrefunded_source(bundle, key, value):
+    bundle["stripe_runs"][0]["payment"]["charge"][key] = value
+    assert any("paid/captured succeeded charge" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("buyer", [None, "0x" + "2" * 40, "invalid"])
+def test_positive_capture_requires_the_frozen_verified_buyer(bundle, buyer):
+    bundle["stripe_runs"][0]["payment"]["charge"]["payment_method_details"]["crypto"][
+        "buyer_address"
+    ] = buyer
+    assert any("verified payer snapshot" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("actor_sub", "other"),
+        ("source", "self_declared"),
+        ("tenant_id", "other"),
+        ("address", "0x" + "2" * 40),
+    ],
+)
+def test_payer_snapshot_is_server_owned_and_scope_bound(bundle, field, value):
+    bundle["stripe_runs"][0]["payment"]["payer_snapshot"][field] = value
+    assert any("verified payer snapshot" in e for e in check(bundle))
+
+
+def test_buyer_wallet_normalization_is_case_insensitive(bundle):
+    payment = bundle["stripe_runs"][0]["payment"]
+    payment["payer_snapshot"]["address"] = "0x" + "aB" * 20
+    payment["charge"]["payment_method_details"]["crypto"]["buyer_address"] = (
+        "0x" + "Ab" * 20
+    )
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schedule_interval", "daily"),
+        ("host_standard_payouts", True),
+        ("host_instant_payouts", True),
+        ("host_schedule_editing", True),
+        ("account_id", "acct_wrong"),
+        ("host_probes", []),
+    ],
+)
+def test_transfers_require_platform_controlled_manual_payouts(bundle, field, value):
+    bundle["gateway_runs"][0]["readiness"]["payout_controls"][field] = value
+    assert any("payout" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("allowed", True),
+        ("http_status", 200),
+        ("actor_role", "platform_admin"),
+        ("tenant_id", "other"),
+        ("account_id", "acct_wrong"),
+    ],
+)
+def test_host_refusal_probe_cannot_be_an_admin_or_unrelated_request(
+    bundle, field, value
+):
+    bundle["stripe_runs"][0]["readiness"]["payout_controls"]["host_probes"][0][
+        field
+    ] = value
+    assert any("owner-bound host refusal probes" in e for e in check(bundle))
+
+
+def test_failed_payout_requires_its_own_funding_chain(bundle):
+    del bundle["failed_bank_payout"]["bank_funding"]
+    assert any("failed_bank_payout" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "po_other"),
+        ("amount", 1),
+        ("net", 1),
+        ("type", "transfer"),
+        ("id", "txn_unrelated"),
+    ],
+)
+def test_failed_bank_return_must_match_the_original_debit(bundle, field, value):
+    bundle["failed_bank_payout"]["bank_funding"]["transactions"][2][field] = value
+    assert any("failed_bank_payout" in e for e in check(bundle))
+
+
+def test_failed_payout_inventory_cannot_omit_debit(bundle):
+    bundle["failed_bank_payout"]["bank_funding"]["transactions"].pop(1)
+    assert any("failed_bank_payout" in e for e in check(bundle))
+
+
+def test_failed_payout_cannot_hide_another_credit(bundle):
+    funding = bundle["failed_bank_payout"]["bank_funding"]
+    extra = deepcopy(funding["transactions"][0])
+    extra["id"] = "txn_othercredit"
+    funding["transactions"].append(extra)
+    assert any("failed_bank_payout" in e for e in check(bundle))
+
+
+def test_failed_payout_closing_balance_must_reconcile_preserved_earnings(bundle):
+    bundle["failed_bank_payout"]["bank_funding"]["closing_balance"][
+        "available_cents"
+    ] = 1
+    assert any("failed_bank_payout" in e for e in check(bundle))
+
+
+def test_payer_snapshot_cannot_be_created_after_checkout(bundle):
+    payment = bundle["stripe_runs"][0]["payment"]
+    payment["payer_snapshot"]["recorded_at"] = payment["recorded_at"]
+    assert any(
+        "verified payer snapshot must precede checkout" in e for e in check(bundle)
+    )
+
+
+def test_controls_cannot_be_read_after_the_transfer(bundle):
+    row = bundle["gateway_runs"][0]
+    row["readiness"]["payout_controls"]["recorded_at"] = row["recorded_at"]
+    assert any("payout controls must be observed" in e for e in check(bundle))
+
+
+def test_returned_funds_cannot_predate_payout_debit(bundle):
+    returned = bundle["failed_bank_payout"]["bank_funding"]["transactions"][2]
+    returned["created_at"] = "2026-10-12T07:59:20+00:00"
+    assert any("return must follow debit" in e for e in check(bundle))
