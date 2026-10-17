@@ -482,7 +482,8 @@ def record(name, hour=1, **fields):
     if name.startswith("stripe-"):
         sync_bank_to_outcome(result)
     if name.startswith(("gateway-", "stripe-", "ok-")):
-        bind_bank_dispatch(result, result["bank_payout"])
+        bind_connect_dispatch(result)
+        bind_source_type(result, result["bank_payout"])
     return result
 
 
@@ -534,7 +535,7 @@ def sync_bank_to_outcome(row):
         )
 
     if "bank_dispatch_plan" in row:
-        bind_bank_dispatch(row, row["bank_payout"])
+        bind_source_type(row, row["bank_payout"])
 
 
 def empty_reversals(row):
@@ -546,6 +547,88 @@ def empty_reversals(row):
         has_more=False,
         data=[],
     )
+
+
+def bind_connect_dispatch(row):
+    transfer = row["connect_transfer"]
+    transfer.setdefault("source_type", "card")
+    for raw in row["transfer_inventory"]["data"]:
+        if raw["id"] == transfer["id"]:
+            raw["source_type"] = transfer["source_type"]
+    at = datetime.fromisoformat(transfer["created_at"])
+    profile = {"legal_type": "individual", "country": "US", "state": "CA"}
+    row["readiness"]["recipient_profile"] = profile.copy()
+    frozen = {
+        k: row[k] for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+    } | {
+        "account_id": transfer["account_id"],
+        "charge_id": row["payment"]["charge_id"],
+        "amount_cents": transfer["amount_cents"],
+        "attempted_at": (at - timedelta(seconds=5)).isoformat(),
+        "profile": profile,
+        "reversed_cents": 0,
+    }
+    authority = {}
+    for stage, seconds in (("prepared", 4), ("dispatching", 2), ("succeeded", -1)):
+        state = deepcopy(frozen) | {
+            "status": stage,
+            "attempts": 0 if stage == "prepared" else 1,
+        }
+        if stage == "succeeded":
+            state.update(transfer_id=transfer["id"], operator_required=False)
+        authority[stage] = record(
+            "connect-" + stage + "-" + row["id"],
+            recorded_at=(at - timedelta(seconds=seconds)).isoformat(),
+            source="payment_connect_dispatch",
+            state=state,
+        )
+    authority["source_recheck"] = record(
+        "source-recheck-" + row["id"],
+        recorded_at=(at - timedelta(seconds=3)).isoformat(),
+        source="payment_connect_source_recheck",
+        **{
+            k: v
+            for k, v in frozen.items()
+            if k not in ("profile", "attempted_at", "reversed_cents")
+        },
+        charge=deepcopy(row["payment"]["charge"]),
+    )
+    authority["provider_request"] = record(
+        "transfer-request-" + row["id"],
+        recorded_at=transfer["created_at"],
+        source="stripe_request",
+        request_id="req_connect" + row["connect_transfer"]["id"][3:],
+        method="POST",
+        path="/v1/transfers",
+        livemode=False,
+        transfer_id=transfer["id"],
+        idempotency_key=f"hm-sandbox-transfer:{row['tenant_id']}:{row['lease_id']}:{row['billing_record_id']}",
+        parameters={
+            "amount": transfer["amount_cents"],
+            "currency": "usd",
+            "destination": transfer["account_id"],
+            "source_transaction": row["payment"]["charge_id"],
+            "metadata": {
+                k: row[k]
+                for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+            },
+        },
+    )
+    row["connect_dispatch"] = authority
+
+
+def bind_source_type(row, payout, source_type="card"):
+    row["connect_transfer"]["source_type"] = source_type
+    for raw in row["transfer_inventory"]["data"]:
+        if raw["id"] == row["connect_transfer"]["id"]:
+            raw["source_type"] = source_type
+    funding = row["bank_funding"]
+    funding["source_type"] = source_type
+    for side in ("opening_balance", "closing_balance"):
+        balance = funding[side]
+        balance["available_source_types"] = {source_type: balance["available_cents"]}
+        balance["pending_source_types"] = {source_type: 0}
+    bind_bank_dispatch(row, payout)
 
 
 def bind_bank_dispatch(row, payout):
@@ -565,6 +648,7 @@ def bind_bank_dispatch(row, payout):
         "transfer_id": row["connect_transfer"]["id"],
         "account_id": payout["account_id"],
         "bank_id": payout["bank_id"],
+        "source_type": row["connect_transfer"].get("source_type", "card"),
         "amount_cents": payout["amount_cents"],
         "currency": "usd",
         "livemode": False,
@@ -582,6 +666,7 @@ def bind_bank_dispatch(row, payout):
         k: frozen[k] for k in ("plan_id", "operation_id", "transfer_id", "charge_id")
     }
     payout["metadata"] = deepcopy(metadata)
+    payout["source_type"] = frozen["source_type"]
     row["bank_dispatch_checkpoint"] = record(
         "bank-checkpoint-" + token,
         recorded_at=(created + timedelta(seconds=2)).isoformat(),
@@ -605,6 +690,7 @@ def bind_bank_dispatch(row, payout):
                 "amount": payout["amount_cents"],
                 "currency": "usd",
                 "destination": payout["bank_id"],
+                "source_type": frozen["source_type"],
                 "metadata": metadata,
             },
         ),
@@ -899,7 +985,7 @@ def bundle():
         "receipt": record(
             "receipt",
             tax_version="EXAMPLE-tax-1",
-            ruleset_version="rules-1",
+            ruleset_version="lease-fixed-hour/v1",
             throughput_map_version="map-1",
         ),
         "enrollment": record(
@@ -1252,6 +1338,15 @@ def bundle():
         operator_required=True,
         reason="repeated_mismatch",
     )
+    for row in [
+        *result["gateway_runs"],
+        *result["stripe_runs"],
+        result["refund_recovery"],
+        result["failed_bank_payout"],
+    ]:
+        bind_connect_dispatch(row)
+        if "bank_funding" in row:
+            bind_source_type(row, row.get("bank_payout", row))
     return result
 
 
@@ -2050,6 +2145,7 @@ def test_supported_original_charge_and_refund_ids_pass(
         id=row["refund"]["refund_id"], charge=row["payment"]["charge_id"]
     )
     bind_bank_dispatch(row, row["bank_payout"])
+    bind_connect_dispatch(row)
     assert check(bundle) == []
 
 
@@ -4044,6 +4140,7 @@ def test_fully_reconciled_gateway_cannot_transfer_more_than_original_capture(
     row["bank_funding"]["transactions"][0].update(amount=amount, net=amount)
     row["bank_funding"]["transactions"][1].update(amount=-amount, net=-amount)
     bind_bank_dispatch(row, row["bank_payout"])
+    bind_connect_dispatch(row)
     if amount <= 400:
         assert check(bundle) == []
     else:
@@ -4079,7 +4176,7 @@ def test_simulation_marker_rejects_creation_attempt_expired_at_original_checkout
     assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
 
 
-@pytest.mark.parametrize("length,valid", [(64, True), (65, False), (128, False)])
+@pytest.mark.parametrize("length,valid", [(64, False), (65, False), (128, False)])
 def test_receipt_ruleset_version_uses_native_persisted_64_character_limit(
     bundle, length, valid
 ):
@@ -4303,3 +4400,226 @@ def test_every_transferred_payment_proves_compute_only_host_allocation(
     assert any(
         "host payable must reconcile owner compute-only" in e for e in check(bundle)
     )
+
+
+def replace_tax_revision_everywhere(value, original, replacement):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if child == original:
+                value[key] = replacement
+            else:
+                replace_tax_revision_everywhere(child, original, replacement)
+    elif isinstance(value, list):
+        for child in value:
+            replace_tax_revision_everywhere(child, original, replacement)
+
+
+@pytest.mark.parametrize("style", ["hex", "uppercase", "urn", "braces", "canonical"])
+def test_tax_revision_must_match_native_canonical_persisted_uuid(bundle, style):
+    original = bundle["stripe_runs"][0]["payment"]["tax_revision_id"]
+    replacement = {
+        "hex": original.replace("-", ""),
+        "uppercase": original.upper(),
+        "urn": "urn:uuid:" + original,
+        "braces": "{" + original + "}",
+        "canonical": original,
+    }[style]
+    replace_tax_revision_everywhere(bundle, original, replacement)
+    if style == "canonical":
+        assert check(bundle) == []
+    else:
+        assert any(
+            "tax binding" in e or "revision/calculation pair" in e
+            for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize(
+    "ruleset",
+    ["lease-fixed-hour/v1", "garbage-but-not-placeholder", "lease-fixed-hour/v2"],
+)
+def test_receipt_proves_native_ruleset_for_fresh_journeys(bundle, ruleset):
+    receipt = bundle["receipt"]
+    for artifact in (receipt, receipt["owner_artifact"], receipt["frozen_lease"]):
+        artifact["ruleset_version"] = ruleset
+    if ruleset == "lease-fixed-hour/v1":
+        assert check(bundle) == []
+    else:
+        assert any("missing ruleset_version" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+@pytest.mark.parametrize(
+    "stage",
+    ["prepared", "dispatching", "succeeded", "source_recheck", "provider_request"],
+)
+def test_transfers_cannot_bypass_persisted_connect_owner_dispatch(bundle, group, stage):
+    row = bundle[group][0] if group.endswith("runs") else bundle[group]
+    del row["connect_dispatch"][stage]
+    assert any("Connect" in e or "connect_dispatch" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("stage", ["prepared", "dispatching", "succeeded"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount_cents", 101),
+        ("charge_id", "ch_other"),
+        ("account_id", "acct_other"),
+        ("status", "waiting_recipient"),
+        ("attempts", True),
+        ("profile", {}),
+        ("attempted_at", "2026-10-12T00:00:00+00:00"),
+    ],
+)
+def test_connect_dispatch_snapshots_preserve_native_immutable_attempt(
+    bundle, stage, field, value
+):
+    bundle["stripe_runs"][0]["connect_dispatch"][stage]["state"][field] = value
+    assert any("Connect" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "age,valid",
+    [
+        (timedelta(hours=23) - timedelta(microseconds=1), True),
+        (timedelta(hours=23), False),
+    ],
+)
+def test_connect_creation_uses_original_bounded_mutation_window(bundle, age, valid):
+    row = bundle["stripe_runs"][0]
+    authority = row["connect_dispatch"]
+    attempted = datetime.fromisoformat(authority["prepared"]["state"]["attempted_at"])
+    created = attempted + age
+    row["connect_transfer"]["created_at"] = created.isoformat()
+    authority["dispatching"]["recorded_at"] = (
+        created - timedelta(seconds=2)
+    ).isoformat()
+    authority["source_recheck"]["recorded_at"] = (
+        created - timedelta(seconds=3)
+    ).isoformat()
+    authority["succeeded"]["recorded_at"] = (created + timedelta(seconds=1)).isoformat()
+    # Isolate this predicate: later refund/bank records intentionally remain unmoved.
+    window_errors = [e for e in check(bundle) if "23-hour mutation window" in e]
+    assert bool(window_errors) is not valid
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount_refunded", 301),
+        ("amount_refunded", True),
+        ("payment_intent", "pi_wrong"),
+        ("amount", 399),
+        ("currency", "eur"),
+        ("livemode", True),
+        ("paid", False),
+    ],
+)
+def test_connect_source_charge_is_rechecked_before_provider_dispatch(
+    bundle, field, value
+):
+    bundle["gateway_runs"][0]["connect_dispatch"]["source_recheck"]["charge"][field] = (
+        value
+    )
+    assert any("source-charge recheck" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("source_type", ["card", "bank_account", "fpx"])
+def test_bank_payout_freezes_the_transfer_funded_source_balance(bundle, source_type):
+    for row in [
+        *bundle["gateway_runs"],
+        *bundle["stripe_runs"],
+        bundle["failed_bank_payout"],
+    ]:
+        bind_source_type(row, row.get("bank_payout", row), source_type)
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "transfer",
+        "payout",
+        "plan",
+        "checkpoint",
+        "request",
+        "funding",
+        "opening",
+        "closing",
+    ],
+)
+def test_bank_payout_cannot_switch_or_omit_frozen_balance_source_type(bundle, location):
+    row = bundle["stripe_runs"][0]
+    targets = {
+        "transfer": row["connect_transfer"],
+        "payout": row["bank_payout"],
+        "plan": row["bank_dispatch_plan"],
+        "checkpoint": row["bank_dispatch_checkpoint"],
+        "request": row["bank_dispatch_checkpoint"]["provider_request"]["parameters"],
+        "funding": row["bank_funding"],
+        "opening": row["bank_funding"]["opening_balance"],
+        "closing": row["bank_funding"]["closing_balance"],
+    }
+    field = (
+        "available_source_types"
+        if location in ("opening", "closing")
+        else "source_type"
+    )
+    targets[location].pop(field)
+    assert check(bundle)
+
+
+def test_failed_bank_returns_funds_to_original_source_pool(bundle):
+    balance = bundle["failed_bank_payout"]["bank_funding"]["closing_balance"]
+    balance["available_source_types"] = {
+        "card": 0,
+        "bank_account": balance["available_cents"],
+    }
+    assert any("source_types must reconcile" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("idempotency_key", "fresh-manual-key"),
+        ("transfer_id", "tr_other"),
+        ("path", "/v1/payouts"),
+        ("method", "GET"),
+        ("livemode", True),
+        ("request_id", ""),
+    ],
+)
+def test_connect_request_proves_native_idempotent_transfer_dispatch(
+    bundle, field, value
+):
+    bundle["stripe_runs"][0]["connect_dispatch"]["provider_request"][field] = value
+    assert any("Connect provider request must bind" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount", 99),
+        ("currency", "eur"),
+        ("destination", "acct_other"),
+        ("source_transaction", "ch_other"),
+        ("metadata", {}),
+    ],
+)
+def test_connect_provider_parameters_match_the_persisted_owner_attempt(
+    bundle, field, value
+):
+    bundle["stripe_runs"][0]["connect_dispatch"]["provider_request"]["parameters"][
+        field
+    ] = value
+    assert any("Connect provider request must bind" in e for e in check(bundle))
+
+
+def test_transfer_inventory_must_preserve_provider_balance_source_type(bundle):
+    bundle["stripe_runs"][0]["transfer_inventory"]["data"][0]["source_type"] = (
+        "bank_account"
+    )
+    assert any("exactly one provider transfer" in e for e in check(bundle))
