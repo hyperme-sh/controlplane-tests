@@ -45,6 +45,8 @@ def record(name, hour=1, **fields):
                 hour,
                 recorded_at=(at - timedelta(seconds=150)).isoformat(),
                 host_payable_cents=100,
+                delivered_compute_cents=400,
+                platform_compute_cents=300,
                 currency="usd",
                 tenant_id="11111111-1111-1111-1111-111111111111",
                 host_org_id="22222222-2222-2222-2222-222222222222",
@@ -254,6 +256,15 @@ def record(name, hour=1, **fields):
             refund_due_cents=100,
             refund_idempotency_key="hm-refund-" + token,
             post_refund_host_payable_cents=80,
+            post_refund_platform_compute_cents=220,
+            tax_allocation={
+                "delivered_compute_cents": 300,
+                "retained_tax_cents": 0,
+                "refund_compute_cents": 100,
+                "refund_tax_cents": 0,
+                "refund_total_cents": 100,
+                "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+            },
             reversal_due_cents=20,
             payment_intent_id=payment_id,
             charge_id=charge_id,
@@ -1990,7 +2001,11 @@ def test_no_reversal_only_when_settlement_preserves_host_share(bundle):
         reversal_due_cents=0,
     )
     assert check(bundle)
-    row["settlement"].update(reversal_due_cents=0, post_refund_host_payable_cents=100)
+    row["settlement"].update(
+        reversal_due_cents=0,
+        post_refund_host_payable_cents=100,
+        post_refund_platform_compute_cents=200,
+    )
     sync_bank_to_outcome(row)
     assert check(bundle) == []
 
@@ -4024,6 +4039,7 @@ def test_fully_reconciled_gateway_cannot_transfer_more_than_original_capture(
     row["settlement"]["host_payable_cents"] = row["connect_transfer"][
         "amount_cents"
     ] = row["bank_payout"]["amount_cents"] = amount
+    row["settlement"]["platform_compute_cents"] = 400 - amount
     row["transfer_inventory"]["data"][0]["amount"] = amount
     row["bank_funding"]["transactions"][0].update(amount=amount, net=amount)
     row["bank_funding"]["transactions"][1].update(amount=-amount, net=-amount)
@@ -4075,3 +4091,215 @@ def test_receipt_ruleset_version_uses_native_persisted_64_character_limit(
         assert check(bundle) == []
     else:
         assert any("missing ruleset_version" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_mismatch_capture_sequence_stops_at_native_repeat_threshold(bundle, count):
+    repeated = bundle["repeated_mismatch"]
+    if count == 4:
+        extra = deepcopy(repeated["attempts"][-1])
+        repeated["attempts"].append(extra)
+    else:
+        repeated["attempts"] = repeated["attempts"][:count]
+    repeated["mismatch_count"] = repeated["policy_decision"]["mismatches"] = count
+    if count == 3:
+        assert check(bundle) == []
+    else:
+        assert any("exactly three distinct" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_simulation_must_precede_native_charge_creation_with_second_precision(
+    bundle, offset
+):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    authorized = datetime.fromisoformat(binding["simulation"]["attempted_at"])
+    # A sub-second authority shares its native integer second with the charge.
+    binding["simulation"]["attempted_at"] = (
+        authorized + timedelta(microseconds=999999)
+    ).isoformat()
+    row["payment"]["charge"]["created"] = int(authorized.timestamp()) + offset
+    if offset < 0:
+        assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+    else:
+        assert check(bundle) == []
+
+
+def terminal_mismatch_refund(bundle, status="failed"):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    refund = row["refund"]
+    extra = {
+        "id": "re_priorTerminal",
+        "payment_intent": row["intent"]["id"],
+        "charge": row["charge"]["id"],
+        "status": status,
+        "amount": 400,
+        "currency": "usd",
+        "livemode": False,
+        "metadata": {},
+    }
+    for field, kind, amount, fee in (
+        ("balance_transaction", "refund", -400, 2),
+        ("failure_balance_transaction", "refund_failure", 400, 3),
+    ):
+        extra[field] = {
+            "id": "txn_prior" + field.replace("_", ""),
+            "source": extra["id"],
+            "type": kind,
+            "amount": amount,
+            "fee": fee,
+            "net": amount - fee,
+            "currency": "usd",
+            "status": "available",
+        }
+    refund["inventory"]["data"].append(extra)
+    row["final_accounting"]["retained_fee_cost_cents"] += 5
+    return row, extra
+
+
+@pytest.mark.parametrize("status", ["failed", "canceled"])
+def test_terminal_mismatch_refunds_reconcile_all_transaction_fees(bundle, status):
+    row, _extra = terminal_mismatch_refund(bundle, status)
+    assert check(bundle) == []
+    row["final_accounting"]["retained_fee_cost_cents"] -= 5
+    assert any("inline retained fee" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("charge", "ch_wrong"),
+        ("currency", "eur"),
+        ("amount", 0),
+        ("amount", 401),
+        ("amount", True),
+        ("livemode", True),
+        ("balance_transaction", None),
+        ("failure_balance_transaction", None),
+    ],
+)
+def test_terminal_mismatch_refund_requires_complete_native_accounting(
+    bundle, field, value
+):
+    _, extra = terminal_mismatch_refund(bundle)
+    extra[field] = value
+    assert any("terminal refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "re_wrong"),
+        ("amount", 1),
+        ("net", 400),
+        ("fee", True),
+        ("status", "unknown"),
+        ("exchange_rate", 1),
+        ("type", "charge"),
+    ],
+)
+@pytest.mark.parametrize("side", ["balance_transaction", "failure_balance_transaction"])
+def test_terminal_mismatch_transactions_validate_provider_fields(
+    bundle, side, field, value
+):
+    _, extra = terminal_mismatch_refund(bundle)
+    extra[side][field] = value
+    assert any("terminal refund requires native" in e for e in check(bundle))
+
+
+def taxable_settlement_fixture(row):
+    payment, settlement = row["payment"], row["settlement"]
+    payment["subtotal_cents"] = 320
+    payment["tax_payable"].update(subtotal_cents=320, tax_cents=80)
+    settlement.update(
+        delivered_compute_cents=320,
+        platform_compute_cents=220,
+        post_refund_platform_compute_cents=160,
+    )
+    settlement["tax_allocation"].update(
+        delivered_compute_cents=240,
+        retained_tax_cents=60,
+        refund_compute_cents=80,
+        refund_tax_cents=20,
+    )
+
+
+def test_taxable_host_proceeds_use_compute_not_gross_capture(bundle):
+    row = bundle["stripe_runs"][1]
+    taxable_settlement_fixture(row)
+    assert check(bundle) == []
+    row["settlement"]["delivered_compute_cents"] = 400
+    row["settlement"]["platform_compute_cents"] = 300
+    assert any("compute-only allocation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("delivered_compute_cents", 300),
+        ("retained_tax_cents", 0),
+        ("refund_compute_cents", 100),
+        ("refund_tax_cents", 0),
+        ("refund_total_cents", 80),
+        ("allocation_policy", "other"),
+    ],
+)
+def test_taxed_refund_binds_native_compute_tax_allocation(bundle, field, value):
+    row = bundle["stripe_runs"][1]
+    taxable_settlement_fixture(row)
+    row["settlement"]["tax_allocation"][field] = value
+    assert any("refund must reconcile native compute-only" in e for e in check(bundle))
+
+
+def test_post_refund_host_cannot_take_retained_sales_tax(bundle):
+    row = bundle["stripe_runs"][1]
+    taxable_settlement_fixture(row)
+    row["settlement"]["post_refund_host_payable_cents"] = 250
+    row["settlement"]["post_refund_platform_compute_cents"] = -10
+    assert any("refund must reconcile native compute-only" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("operator", [False, True])
+def test_terminal_refund_fees_add_to_standalone_charge_cost(bundle, operator):
+    row, _ = terminal_mismatch_refund(bundle)
+    standalone_fees(row, operator=operator)
+    row["final_accounting"]["retained_fee_cost_cents"] += 5
+    assert check(bundle) == []
+
+
+def test_terminal_failure_credit_can_return_a_processing_fee(bundle):
+    row, extra = terminal_mismatch_refund(bundle)
+    extra["failure_balance_transaction"].update(fee=-2, net=402)
+    row["final_accounting"]["retained_fee_cost_cents"] = 10
+    assert check(bundle) == []
+
+
+def test_bare_failed_refund_cannot_hide_missing_fee_accounting(bundle):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    row["refund"]["inventory"]["data"].append(
+        {"id": "re_bare", "payment_intent": row["intent"]["id"], "status": "failed"}
+    )
+    assert any("terminal refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("delivered_compute_cents", 401),
+        ("delivered_compute_cents", True),
+        ("platform_compute_cents", -1),
+        ("platform_compute_cents", 299),
+    ],
+)
+def test_every_transferred_payment_proves_compute_only_host_allocation(
+    bundle, group, field, value
+):
+    row = bundle[group][0] if group.endswith("runs") else bundle[group]
+    row["settlement"][field] = value
+    assert any(
+        "host payable must reconcile owner compute-only" in e for e in check(bundle)
+    )
