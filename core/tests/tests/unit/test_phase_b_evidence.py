@@ -117,6 +117,10 @@ def record(name, hour=1, **fields):
             ),
         )
     if name.startswith(("gateway-", "stripe-", "ok-")):
+        result["connect_transfer"]["metadata"] = {
+            k: result[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        }
         opening_at = (at - timedelta(seconds=90)).isoformat()
         closing_at = (at - timedelta(seconds=20)).isoformat()
         result["bank_funding"] = record(
@@ -219,7 +223,10 @@ def record(name, hour=1, **fields):
                 "livemode": False,
                 "currency": "usd",
                 "amount": 400,
-                "payment_method_details": {"type": "crypto", "crypto": {}},
+                "payment_method_details": {
+                    "type": "crypto",
+                    "crypto": {"network": "base", "token_currency": "usdc"},
+                },
             },
         )
         result["payment"].update(
@@ -313,6 +320,19 @@ def record(name, hour=1, **fields):
             "balance_transaction": "txn_" + token,
             "metadata": scope | {"reversal_target_cents": "20"},
         }
+        outcome = result["refund"]["transfer_outcome"]
+        outcome["provider_reversal"]["created_at"] = (
+            at - timedelta(seconds=6)
+        ).isoformat()
+        outcome["reversal_inventory"] = record(
+            "reversal-inventory-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=2)).isoformat(),
+            transfer_id=result["connect_transfer"]["id"],
+            complete=True,
+            has_more=False,
+            data=[deepcopy(outcome["provider_reversal"])],
+        )
     return result
 
 
@@ -549,6 +569,8 @@ def bundle():
     transfer = recovery["connect_transfer"]
     outcome = refund["transfer_outcome"]
     outcome.pop("provider_reversal")
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
     outcome.update(
         kind="platform_loss",
         reversal_id=None,
@@ -1322,6 +1344,8 @@ def test_matching_transfer_reversal_is_not_inferred(bundle, field, value):
 def test_platform_loss_after_short_balance_requires_completed_owner_record(bundle):
     row = bundle["stripe_runs"][0]
     outcome = row["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
     outcome.update(
         kind="platform_loss",
         reversal_id=None,
@@ -1346,6 +1370,8 @@ def test_platform_loss_after_short_balance_requires_completed_owner_record(bundl
 def test_no_reversal_only_when_settlement_preserves_host_share(bundle):
     row = bundle["stripe_runs"][0]
     outcome = row["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
     outcome.update(
         kind="not_required",
         reversal_id=None,
@@ -1463,6 +1489,8 @@ def test_platform_loss_cannot_also_claim_successful_reversal_identifiers(
     bundle, field, value
 ):
     outcome = bundle["stripe_runs"][0]["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
     outcome.update(
         kind="platform_loss",
         reversal_id=None,
@@ -1506,6 +1534,8 @@ def test_refund_provider_creation_must_not_follow_its_observation(bundle):
 
 def test_loss_outcome_cannot_preserve_reversal_balance_transaction(bundle):
     outcome = bundle["stripe_runs"][0]["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
     outcome.update(
         kind="platform_loss",
         reversal_id=None,
@@ -1895,3 +1925,93 @@ def test_matching_provider_payer_is_not_mismatch_evidence(bundle):
 def test_each_mismatch_requires_its_own_provider_and_owner_evidence(bundle, key):
     bundle["repeated_mismatch"]["attempts"][1].pop(key)
     assert any("repeated_mismatch" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "crypto",
+    [
+        {},
+        {"network": "ethereum", "token_currency": "usdc"},
+        {"network": "base", "token_currency": "usdt"},
+    ],
+)
+def test_stablecoin_journeys_require_base_usdc(bundle, crypto):
+    bundle["stripe_runs"][0]["payment"]["charge"]["payment_method_details"][
+        "crypto"
+    ] = crypto
+    assert any("stablecoin source requires" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("status", ["succeeded", "pending", "requires_action"])
+def test_nonmatching_refund_cannot_hide_actual_or_pending_money_movement(
+    bundle, status
+):
+    inventory = bundle["stripe_runs"][0]["refund"]["inventory"]
+    manual = deepcopy(inventory["data"][0])
+    manual.update(id="pyr_manual", amount=50, metadata={}, status=status)
+    inventory["data"].append(manual)
+    assert any(
+        "additional successful or unresolved refunds" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("key", ["provider_reversal", "reversal_inventory"])
+def test_platform_loss_cannot_retain_nested_provider_reversal(bundle, key):
+    bundle["refund_recovery"]["refund"]["transfer_outcome"][key] = deepcopy(
+        bundle["stripe_runs"][0]["refund"]["transfer_outcome"][key]
+    )
+    assert any("platform-funded refund, recorded loss" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"tenant_id": "another"}])
+def test_gateway_transfers_require_provider_settlement_scope(bundle, metadata):
+    bundle["gateway_runs"][0]["connect_transfer"]["metadata"] = metadata
+    assert any("provider transfer metadata must match" in e for e in check(bundle))
+
+
+def test_historical_reversal_cannot_recover_a_later_refund(bundle):
+    refund = bundle["stripe_runs"][0]["refund"]
+    reversal = refund["transfer_outcome"]["provider_reversal"]
+    reversal["created_at"] = (
+        datetime.fromisoformat(refund["created_at"]) - timedelta(seconds=1)
+    ).isoformat()
+    assert any("provider reversal creation must follow" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("complete", False),
+        ("has_more", True),
+        ("transfer_id", "tr_unrelated"),
+        ("data", []),
+    ],
+)
+def test_reversal_list_must_be_complete_for_the_original_transfer(bundle, key, value):
+    bundle["stripe_runs"][0]["refund"]["transfer_outcome"]["reversal_inventory"][
+        key
+    ] = value
+    assert any("reversal" in e for e in check(bundle))
+
+
+def test_duplicate_provider_reversals_for_one_target_fail(bundle):
+    inventory = bundle["stripe_runs"][0]["refund"]["transfer_outcome"][
+        "reversal_inventory"
+    ]
+    duplicate = deepcopy(inventory["data"][0])
+    duplicate["id"] = "trr_duplicate"
+    inventory["data"].append(duplicate)
+    assert any("exactly one provider reversal" in e for e in check(bundle))
+
+
+def test_unrelated_provider_reversal_cannot_hide_extra_host_debit(bundle):
+    inventory = bundle["stripe_runs"][0]["refund"]["transfer_outcome"][
+        "reversal_inventory"
+    ]
+    extra = deepcopy(inventory["data"][0])
+    extra.update(id="trr_manual", metadata={})
+    inventory["data"].append(extra)
+    assert any(
+        "unrelated reversal requires settlement reconciliation" in e
+        for e in check(bundle)
+    )
