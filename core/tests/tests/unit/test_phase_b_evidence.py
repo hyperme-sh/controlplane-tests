@@ -398,6 +398,23 @@ def record(name, hour=1, **fields):
             actor_sub="sandbox-renter",
             address="0x" + "1" * 40,
         )
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        controls = result["readiness"]["payout_controls"]
+        controls["ownership_snapshot"] = record(
+            "ownership-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=140)).isoformat(),
+            source="platform_tenant_registry",
+            subject_to_host={
+                "subject": "sandbox-host-owner",
+                "role": "owner",
+                "active": True,
+                "tenant_id": scope["tenant_id"],
+                "host_org_id": scope["host_org_id"],
+                "stripe_account_id": transfer["account_id"],
+                "enrollment_attempt_id": "original",
+            },
+        )
     return result
 
 
@@ -417,6 +434,7 @@ def refusal_record(name, hour, *, mismatch=False):
         "currency": "usd",
         "amount": 400,
         "amount_received": 400 if mismatch else 0,
+        "payment_method_types": ["crypto"],
         "latest_charge": "py_" + token if mismatch else None,
         "last_payment_error": {"code": "payment_failed"},
         "metadata": {
@@ -491,7 +509,111 @@ def refusal_record(name, hour, *, mismatch=False):
                 address="0x" + "1" * 40,
             ),
         )
+    if mismatch:
+        refund_id = "pyr_mismatch" + token
+        key = "hm-refund-mismatch-" + token
+        charge_tx = {
+            "id": "txn_mismatchcharge" + token,
+            "source": row["charge"]["id"],
+            "amount": 400,
+            "fee": 10,
+            "net": 390,
+            "currency": "usd",
+            "type": "charge",
+        }
+        refund_tx = {
+            "id": "txn_mismatchrefund" + token,
+            "source": refund_id,
+            "amount": -400,
+            "fee": 0,
+            "net": -400,
+            "currency": "usd",
+            "type": "refund",
+        }
+        row["charge"]["balance_transaction"] = charge_tx["id"]
+        metadata = {
+            "billing_record_id": scope["billing_record_id"],
+            "idempotency_key": key,
+        }
+        created_at = (at - timedelta(seconds=60)).isoformat()
+        provider_refund = {
+            "id": refund_id,
+            "payment_intent": intent["id"],
+            "charge": row["charge"]["id"],
+            "amount": 400,
+            "currency": "usd",
+            "status": "succeeded",
+            "livemode": False,
+            "metadata": metadata,
+            "balance_transaction": refund_tx["id"],
+            "created_at": created_at,
+        }
+        row["refund"] = record(
+            "refunded-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=15)).isoformat(),
+            **scope,
+            refund_id=refund_id,
+            payment_intent_id=intent["id"],
+            charge_id=row["charge"]["id"],
+            amount_cents=400,
+            currency="usd",
+            status="succeeded",
+            livemode=False,
+            metadata=metadata,
+            created_at=created_at,
+            inventory=record(
+                "refunds-" + name,
+                hour,
+                recorded_at=(at - timedelta(seconds=10)).isoformat(),
+                complete=True,
+                has_more=False,
+                payment_intent_id=intent["id"],
+                data=[provider_refund],
+            ),
+        )
+        row["final_accounting"] = record(
+            "mismatch-accounting-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=5)).isoformat(),
+            **scope,
+            payment_intent_id=intent["id"],
+            charge_id=row["charge"]["id"],
+            refund_id=refund_id,
+            refund_idempotency_key=key,
+            status="complete",
+            currency="usd",
+            livemode=False,
+            owner_checkpoint="checkpoint-" + token,
+            principal_refunded_cents=400,
+            host_payable_cents=0,
+            retained_fee_cost_cents=10,
+            charge_balance_transaction=charge_tx,
+            refund_balance_transaction=refund_tx,
+        )
     return row
+
+
+def loss_provider_error(outcome):
+    at = datetime.fromisoformat(outcome["recorded_at"]) - timedelta(seconds=1)
+    return record(
+        "refusal-" + outcome["id"],
+        recorded_at=at.isoformat(),
+        **{
+            k: outcome[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        },
+        transfer_id=outcome["transfer_id"],
+        refund_id=outcome["refund_id"],
+        account_id="acct_host",
+        error_type="InvalidRequestError",
+        code="balance_insufficient",
+        request_id="req_" + uuid5(NAMESPACE_URL, outcome["id"]).hex,
+        currency="usd",
+        livemode=False,
+        available_cents=0,
+        amount_cents=outcome["reversal_due_cents"],
+    )
 
 
 @pytest.fixture
@@ -524,6 +646,7 @@ def bundle():
             "enrollment",
             host="AGX64-1",
             owner_approved=True,
+            owner_sub="sandbox-host-owner",
             connect_onboarding=True,
             bank_payout_id="po_" + uuid5(NAMESPACE_URL, "stripe-5").hex,
             tenant_id="11111111-1111-1111-1111-111111111111",
@@ -658,6 +781,7 @@ def bundle():
         refund_id=refund["refund_id"],
         account_id=transfer["account_id"],
         code="balance_insufficient",
+        error_type="InvalidRequestError",
         request_id="req_shortbalance",
         currency="usd",
         livemode=False,
@@ -747,6 +871,34 @@ def bundle():
         }
     )
     failure["bank_funding"] = funding
+    journey = result["stripe_runs"][0]
+    receipt = result["receipt"]
+    receipt.update(
+        {
+            k: journey[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        }
+    )
+    receipt.update(
+        journey_id=journey["id"],
+        payment_intent_id=journey["payment"]["payment_intent_id"],
+        charge_id=journey["payment"]["charge_id"],
+        amount_cents=400,
+        currency="usd",
+        livemode=False,
+        recorded_at=journey["recorded_at"],
+    )
+    receipt["owner_artifact"] = record(
+        "receipt-artifact",
+        5,
+        recorded_at="2026-10-12T04:59:59+00:00",
+        source="billing_receipt",
+        **{
+            k: v
+            for k, v in receipt.items()
+            if k not in ("id", "url", "revision", "recorded_at", "passed")
+        },
+    )
     return result
 
 
@@ -1465,6 +1617,7 @@ def test_platform_loss_after_short_balance_requires_completed_owner_record(bundl
         refunded_from_platform_cents=100,
         loss_record="billing-owner-loss-checkpoint",
     )
+    outcome["provider_refusal"] = loss_provider_error(outcome)
     assert check(bundle) == []
     outcome["operator_visible"] = False
     assert check(bundle)
@@ -1519,6 +1672,9 @@ def test_supported_original_charge_and_refund_ids_pass(
     row["transfer_inventory"]["data"][0]["source_transaction"] = row["payment"][
         "charge_id"
     ]
+    bundle["receipt"]["charge_id"] = bundle["receipt"]["owner_artifact"][
+        "charge_id"
+    ] = row["payment"]["charge_id"]
     row["refund"]["refund_id"] = refund_prefix + "_supported"
     row["refund"]["transfer_outcome"]["refund_id"] = row["refund"]["refund_id"]
     row["payment"]["capture_event"]["data"]["object"] = deepcopy(
@@ -1613,6 +1769,7 @@ def test_platform_loss_cannot_also_claim_successful_reversal_identifiers(
         refunded_from_platform_cents=100,
         loss_record="owner-loss",
     )
+    outcome["provider_refusal"] = loss_provider_error(outcome)
     assert check(bundle) == []
     outcome[field] = value
     assert check(bundle)
@@ -1657,6 +1814,7 @@ def test_loss_outcome_cannot_preserve_reversal_balance_transaction(bundle):
         refunded_from_platform_cents=100,
         loss_record="owner-loss",
     )
+    outcome["provider_refusal"] = loss_provider_error(outcome)
     assert check(bundle)
 
 
@@ -2289,3 +2447,203 @@ def test_returned_funds_cannot_predate_payout_debit(bundle):
     returned = bundle["failed_bank_payout"]["bank_funding"]["transactions"][2]
     returned["created_at"] = "2026-10-12T07:59:20+00:00"
     assert any("return must follow debit" in e for e in check(bundle))
+
+
+def test_cleanup_cancellation_is_not_a_failed_deposit(bundle):
+    row = bundle["failed_deposit"]
+    row["intent"]["status"] = "canceled"
+    row["intent"].pop("last_payment_error")
+    row["provider_event"].update(
+        type="payment_intent.canceled", data={"object": deepcopy(row["intent"])}
+    )
+    assert any("requires provider failed deposit attempt" in e for e in check(bundle))
+
+
+def test_failed_deposit_requires_the_provider_error(bundle):
+    row = bundle["failed_deposit"]
+    row["intent"].pop("last_payment_error")
+    row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
+    assert any("requires provider failed deposit attempt" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "pending"),
+        ("amount_cents", 1),
+        ("charge_id", "py_other"),
+        ("payment_intent_id", "pi_other"),
+        ("metadata", {}),
+        ("billing_record_id", "other"),
+    ],
+)
+def test_every_captured_mismatch_needs_full_bound_refund(bundle, field, value):
+    bundle["repeated_mismatch"]["attempts"][0]["refund"][field] = value
+    assert any("captured mismatch requires succeeded full" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "planned"),
+        ("principal_refunded_cents", 390),
+        ("host_payable_cents", 1),
+        ("retained_fee_cost_cents", 0),
+        ("owner_checkpoint", ""),
+        ("refund_id", "pyr_other"),
+    ],
+)
+def test_mismatch_final_accounting_cannot_remain_unresolved(bundle, field, value):
+    bundle["repeated_mismatch"]["attempts"][1]["final_accounting"][field] = value
+    assert any("mismatch accounting requires" in e for e in check(bundle))
+
+
+def test_extra_mismatch_refund_cannot_be_hidden_by_metadata(bundle):
+    inventory = bundle["repeated_mismatch"]["attempts"][0]["refund"]["inventory"]
+    extra = deepcopy(inventory["data"][0])
+    extra.update(id="pyr_extra", metadata={})
+    inventory["data"].append(extra)
+    assert any("additional mismatch refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "kind", ["charge_balance_transaction", "refund_balance_transaction"]
+)
+def test_mismatch_fee_accounting_uses_original_provider_transactions(bundle, kind):
+    bundle["repeated_mismatch"]["attempts"][0]["final_accounting"][kind]["source"] = (
+        "unrelated"
+    )
+    assert any("original-charge/refund provider balance" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("journey_id", "unrelated"),
+        ("lease_id", "unrelated"),
+        ("billing_record_id", "unrelated"),
+        ("payment_intent_id", "pi_other"),
+        ("charge_id", "py_other"),
+        ("amount_cents", 1),
+    ],
+)
+def test_receipt_must_reference_an_accepted_capture(bundle, field, value):
+    bundle["receipt"][field] = value
+    assert any("receipt:" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tax_version", "other"),
+        ("amount_cents", 1),
+        ("billing_record_id", "other"),
+        ("source", "self_declared"),
+    ],
+)
+def test_receipt_requires_the_matching_owner_artifact(bundle, field, value):
+    bundle["receipt"]["owner_artifact"][field] = value
+    assert any("owner receipt artifact must bind" in e for e in check(bundle))
+
+
+def test_receipt_artifact_cannot_predate_its_capture(bundle):
+    bundle["receipt"]["owner_artifact"]["recorded_at"] = "2026-10-12T01:00:00+00:00"
+    assert any(
+        "owner receipt artifact must follow accepted capture" in e
+        for e in check(bundle)
+    )
+
+
+def test_arbitrary_forbidden_subjects_do_not_prove_owner_payout_refusal(bundle):
+    probes = bundle["gateway_runs"][0]["readiness"]["payout_controls"]["host_probes"]
+    for i, probe in enumerate(probes):
+        probe["actor_sub"] = "unauthorized-" + str(i)
+    assert any("owner-bound host refusal probes" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("subject", "other"),
+        ("role", "member"),
+        ("tenant_id", "other"),
+        ("stripe_account_id", "acct_other"),
+        ("enrollment_attempt_id", "other"),
+    ],
+)
+def test_probe_ownership_snapshot_must_identify_enrolled_owner(bundle, field, value):
+    bundle["gateway_runs"][0]["readiness"]["payout_controls"]["ownership_snapshot"][
+        "subject_to_host"
+    ][field] = value
+    assert any("server-owned enrolled subject-to-host" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("code", "other"),
+        ("error_type", "ValueError"),
+        ("amount_cents", 1),
+        ("transfer_id", "tr_other"),
+        ("request_id", None),
+    ],
+)
+def test_regular_stripe_loss_requires_provider_refusal(bundle, field, value):
+    row = bundle["stripe_runs"][0]
+    outcome = row["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal")
+    outcome.pop("reversal_inventory")
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        balance_transaction=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        reversal_refused=True,
+        reason="insufficient_connect_balance",
+        operator_visible=True,
+        financial_state="recorded",
+        refunded_from_platform_cents=100,
+        loss_record="owner-loss",
+    )
+    outcome["provider_refusal"] = loss_provider_error(outcome)
+    assert check(bundle) == []
+    outcome["provider_refusal"][field] = value
+    assert any(
+        "scoped provider balance_insufficient refusal" in e for e in check(bundle)
+    )
+
+
+def test_inactive_owner_does_not_establish_payout_control(bundle):
+    bundle["gateway_runs"][0]["readiness"]["payout_controls"]["ownership_snapshot"][
+        "subject_to_host"
+    ]["active"] = False
+    assert any("server-owned enrolled subject-to-host" in e for e in check(bundle))
+
+
+def test_provider_error_request_cannot_be_reused_for_another_loss(bundle):
+    outcomes = []
+    for row in bundle["stripe_runs"][:2]:
+        outcome = row["refund"]["transfer_outcome"]
+        outcome.pop("provider_reversal")
+        outcome.pop("reversal_inventory")
+        outcome.update(
+            kind="platform_loss",
+            reversal_id=None,
+            balance_transaction=None,
+            reversed_cents=0,
+            platform_loss_cents=20,
+            reversal_refused=True,
+            reason="insufficient_connect_balance",
+            operator_visible=True,
+            financial_state="recorded",
+            refunded_from_platform_cents=100,
+            loss_record="loss-" + row["id"],
+        )
+        outcome["provider_refusal"] = loss_provider_error(outcome)
+        outcomes.append(outcome)
+    assert check(bundle) == []
+    outcomes[1]["provider_refusal"]["request_id"] = outcomes[0]["provider_refusal"][
+        "request_id"
+    ]
+    assert any("provider error request reused" in e for e in check(bundle))
