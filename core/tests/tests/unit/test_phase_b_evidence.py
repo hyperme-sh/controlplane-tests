@@ -548,6 +548,7 @@ def sync_bank_to_outcome(row):
 
     if "bank_dispatch_plan" in row:
         bind_source_type(row, row["bank_payout"])
+    bind_money_dispatch(row)
 
 
 def empty_reversals(row):
@@ -559,6 +560,202 @@ def empty_reversals(row):
         has_more=False,
         data=[],
     )
+
+
+def bind_money_dispatch(row, mismatch=False):
+    refund = row.get("refund")
+    if not isinstance(refund, dict):
+        return
+    scope = {
+        k: row[k] for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+    }
+    payment = (
+        {
+            "payment_intent_id": row["intent"]["id"],
+            "charge_id": row["charge"]["id"],
+            "subtotal_cents": row["subtotal_cents"],
+        }
+        if mismatch
+        else row["payment"]
+    )
+    settlement = row.get("settlement") or {}
+    raw = row["refund_plan"]["plan"] if mismatch else {}
+    allocation = (
+        raw.get("stripe_tax_allocation")
+        if mismatch
+        else settlement.get("tax_allocation")
+    )
+    common = scope | {
+        "payment_intent_id": payment["payment_intent_id"],
+        "charge_id": payment["charge_id"],
+        "amount_cents": refund["amount_cents"],
+        "currency": "usd",
+        "livemode": False,
+        "reserved_compute_cents": payment["subtotal_cents"],
+        "refund_compute_cents": raw.get("refund_cents")
+        if mismatch
+        else allocation["refund_compute_cents"],
+        "delivered_compute_cents": 0
+        if mismatch
+        else allocation["delivered_compute_cents"],
+        "tax_allocation": deepcopy(allocation),
+    }
+    key = (
+        row["final_accounting"]["refund_idempotency_key"]
+        if mismatch
+        else settlement["refund_idempotency_key"]
+    )
+    created = datetime.fromisoformat(refund["created_at"])
+    attempted = (
+        raw["stripe_refund_attempted_at"]
+        if mismatch
+        else (created - timedelta(seconds=3)).isoformat()
+    )
+    plan_fields = common | {"idempotency_key": key, "attempted_at": attempted}
+    if mismatch:
+        plan_fields["approval_at"] = row["refund_approval"]["approved_at"]
+    refund["dispatch_plan"] = record(
+        "dispatch-refund-plan-" + row["id"],
+        recorded_at=(created - timedelta(seconds=2)).isoformat(),
+        source="payment_refund_plan",
+        status="prepared",
+        **plan_fields,
+    )
+    refund["dispatch_checkpoint"] = record(
+        "dispatch-refund-bound-" + row["id"],
+        recorded_at=(created + timedelta(microseconds=500000)).isoformat(),
+        source="payment_refund_dispatch",
+        status="bound",
+        refund_id=refund["refund_id"],
+        **plan_fields,
+        provider_request=record(
+            "request-refund-" + row["id"],
+            recorded_at=refund["created_at"],
+            source="stripe_request",
+            request_id="req_refund" + refund["refund_id"].replace("_", ""),
+            method="POST",
+            path="/v1/refunds",
+            livemode=False,
+            idempotency_key=key,
+            refund_id=refund["refund_id"],
+            parameters={
+                "payment_intent": payment["payment_intent_id"],
+                "amount": refund["amount_cents"],
+                "metadata": {
+                    "billing_record_id": row["billing_record_id"],
+                    "idempotency_key": key,
+                },
+            },
+        ),
+    )
+    outcome = refund.get("transfer_outcome") or {}
+    if outcome.get("kind") != "reversed":
+        return
+    reversal = outcome["provider_reversal"]
+    transfer = row["connect_transfer"]
+    due = settlement["reversal_due_cents"]
+    fields = scope | {
+        "transfer_id": transfer["id"],
+        "refund_id": refund["refund_id"],
+        "account_id": transfer["account_id"],
+        "charge_id": payment["charge_id"],
+        "amount_cents": due,
+        "target_cents": due,
+        "currency": "usd",
+        "livemode": False,
+        "idempotency_key": f"hm-sandbox-reversal:{row['billing_record_id']}:{due}",
+        "attempted_at": (
+            datetime.fromisoformat(reversal["created_at"]) - timedelta(seconds=1)
+        ).isoformat(),
+    }
+    outcome["owner_reversal"] = {
+        "dispatch_plan": record(
+            "owner-reverse-plan-" + row["id"],
+            recorded_at=fields["attempted_at"],
+            source="payment_connect_reversal_plan",
+            status="reversing",
+            **fields,
+        ),
+        "dispatch_checkpoint": record(
+            "owner-reverse-bound-" + row["id"],
+            recorded_at=outcome["recorded_at"],
+            source="payment_connect_reversal_dispatch",
+            status="reversed"
+            if due == transfer["amount_cents"]
+            else "partially_reversed",
+            reversal_id=reversal["id"],
+            **fields,
+            provider_request=record(
+                "owner-reverse-request-" + row["id"],
+                recorded_at=reversal["created_at"],
+                source="stripe_request",
+                request_id="req_reversal" + reversal["id"].replace("_", ""),
+                method="POST",
+                path=f"/v1/transfers/{transfer['id']}/reversals",
+                livemode=False,
+                reversal_id=reversal["id"],
+                idempotency_key=fields["idempotency_key"],
+                parameters={
+                    "amount": due,
+                    "metadata": scope | {"reversal_target_cents": str(due)},
+                },
+            ),
+        ),
+    }
+
+
+def bind_automatic_guard(row):
+    policy = row["policy_observation"]
+    policy.update(
+        eligible=True,
+        reason="eligible_pending_fee_accounting",
+        reserved_cents=row["amount_cents"],
+        daily_count_limit=2,
+        daily_value_limit_cents=5000,
+        repeat_threshold=3,
+    )
+    row["refund_approval"].update(
+        kind="automatic", eligible=True, reason="eligible_pending_fee_accounting"
+    )
+    plan = row["refund_plan"]["plan"]
+    plan["automatic_approved_mismatch_at"] = plan.pop("operator_approved_mismatch_at")
+    created = datetime.fromisoformat(row["refund"]["created_at"])
+    row["automatic_guard"] = record(
+        "automatic-guard-" + row["id"],
+        recorded_at=(created - timedelta(seconds=1)).isoformat(),
+        source="payment_mismatch_creation_guard",
+        **{
+            k: row[k]
+            for k in (
+                "tenant_id",
+                "host_org_id",
+                "lease_id",
+                "billing_record_id",
+                "actor_sub",
+            )
+        },
+        payment_intent_id=row["intent"]["id"],
+        charge_id=row["charge"]["id"],
+        day=policy["day"],
+        mismatches=policy["counter_after"],
+        reserved_count=1,
+        reserved_cents=row["amount_cents"],
+        person_lock_held=True,
+        enabled_before=True,
+        enabled_after=True,
+        checked_before_at=(created - timedelta(seconds=2)).isoformat(),
+        checked_after_at=(created - timedelta(seconds=1)).isoformat(),
+        fee_observation={
+            "currency": "usd",
+            "captured_cents": row["amount_cents"],
+            "refunded_cents": 0,
+            "refunds": [],
+            "charge_balance_transaction": deepcopy(
+                row["final_accounting"]["charge_balance_transaction"]
+            ),
+        },
+    )
+    bind_money_dispatch(row, mismatch=True)
 
 
 def bind_connect_dispatch(row):
@@ -627,6 +824,22 @@ def bind_connect_dispatch(row):
         },
     )
     row["connect_dispatch"] = authority
+    inventory = row["transfer_inventory"]
+    inventory.update(
+        destination=None,
+        scope="platform",
+        window_start_at=frozen["attempted_at"],
+        window_end_at=inventory["recorded_at"],
+    )
+    inventory["filters"] = {
+        "created": {
+            "gte": int(
+                datetime.fromisoformat(inventory["window_start_at"]).timestamp()
+            ),
+            "lte": int(datetime.fromisoformat(inventory["window_end_at"]).timestamp()),
+        }
+    }
+    bind_money_dispatch(row)
 
 
 def bind_source_type(row, payout, source_type="card"):
@@ -985,6 +1198,8 @@ def refusal_record(name, hour, *, mismatch=False):
     )
     row["intent"]["metadata"].update(lease_id=scope["lease_id"], payment_flow="deposit")
     row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
+    if mismatch:
+        bind_money_dispatch(row, mismatch=True)
     return row
 
 
@@ -1043,6 +1258,8 @@ def bundle():
             owner_sub="sandbox-host-owner",
             connect_onboarding=True,
             bank_payout_id="po_" + uuid5(NAMESPACE_URL, "stripe-5").hex,
+            stripe_account_id="acct_host",
+            attempt_id="original",
             tenant_id="11111111-1111-1111-1111-111111111111",
             host_org_id="22222222-2222-2222-2222-222222222222",
             enrolled_at="2026-10-12T01:00:00+00:00",
@@ -4369,6 +4586,8 @@ def taxable_settlement_fixture(row):
         refund_tax_cents=20,
     )
 
+    bind_money_dispatch(row)
+
 
 def test_taxable_host_proceeds_use_compute_not_gross_capture(bundle):
     row = bundle["stripe_runs"][1]
@@ -4751,11 +4970,7 @@ def test_mismatch_refund_approval_is_bound_server_provenance(bundle, field, valu
 @pytest.mark.parametrize("index,valid", [(0, True), (2, False)])
 def test_repeat_threshold_forbids_automatic_refund_approval(bundle, index, valid):
     row = bundle["repeated_mismatch"]["attempts"][index]
-    row["refund_approval"].update(
-        kind="automatic", eligible=True, reason="eligible_pending_fee_accounting"
-    )
-    plan = row["refund_plan"]["plan"]
-    plan["automatic_approved_mismatch_at"] = plan.pop("operator_approved_mismatch_at")
+    bind_automatic_guard(row)
     if valid:
         assert check(bundle) == []
     else:
@@ -4854,3 +5069,232 @@ def test_charge_and_refund_id_alphabets_and_bounds_match_native_adapters(
         assert check(bundle) == []
     else:
         assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("eligible", False),
+        ("reason", "daily_count_cap"),
+        ("reserved_cents", 0),
+        ("reserved_cents", True),
+        ("day", "2026-10-11"),
+        ("daily_count_limit", 3),
+        ("daily_value_limit_cents", 5001),
+        ("repeat_threshold", 4),
+    ],
+)
+def test_automatic_approval_cannot_override_persisted_ineligible_policy(
+    bundle, field, value
+):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    bind_automatic_guard(row)
+    row["policy_observation"][field] = value
+    assert any(
+        "automatic refund must bind eligible persisted policy" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("enabled_before", False),
+        ("enabled_after", False),
+        ("person_lock_held", False),
+        ("reserved_count", 0),
+        ("reserved_count", 3),
+        ("reserved_count", True),
+        ("reserved_cents", 399),
+        ("reserved_cents", 5001),
+        ("mismatches", 3),
+        ("mismatches", 0),
+        ("actor_sub", "apikey:other"),
+        ("day", "2026-10-11"),
+        ("checked_after_at", "2026-10-13T00:00:00+00:00"),
+    ],
+)
+def test_automatic_creation_guard_must_hold_current_reservation_through_io(
+    bundle, field, value
+):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    bind_automatic_guard(row)
+    row["automatic_guard"][field] = value
+    assert any("automatic" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("refunds", [{"id": "re_external"}]), ("refunded_cents", 1), ("currency", "eur")],
+)
+def test_automatic_refund_guard_requires_fresh_unmodified_fee_evidence(
+    bundle, field, value
+):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    bind_automatic_guard(row)
+    row["automatic_guard"]["fee_observation"][field] = value
+    assert any("unchanged fee proof" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["stripe_runs", "refund_recovery", "mismatch"])
+@pytest.mark.parametrize(
+    "missing", ["dispatch_plan", "dispatch_checkpoint", "provider_request"]
+)
+def test_provider_refund_and_copied_metadata_cannot_replace_owner_dispatch(
+    bundle, group, missing
+):
+    row = (
+        bundle["stripe_runs"][0]
+        if group == "stripe_runs"
+        else bundle["refund_recovery"]
+        if group == "refund_recovery"
+        else bundle["repeated_mismatch"]["attempts"][0]
+    )
+    refund = row["refund"]
+    if missing == "provider_request":
+        refund["dispatch_checkpoint"].pop(missing)
+    else:
+        refund.pop(missing)
+    assert any("refund" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("side", ["refund", "reversal"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("idempotency_key", "copied-metadata-key"),
+        ("path", "/v1/manual"),
+        ("parameters", {}),
+        ("request_id", ""),
+    ],
+)
+def test_refund_and_reversal_requests_bind_original_owner_idempotency(
+    bundle, side, field, value
+):
+    row = bundle["stripe_runs"][0]
+    authority = (
+        row["refund"]
+        if side == "refund"
+        else row["refund"]["transfer_outcome"]["owner_reversal"]
+    )
+    authority["dispatch_checkpoint"]["provider_request"][field] = value
+    assert any("original provider request" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("side", ["refund", "reversal"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount_cents", 1),
+        ("charge_id", "ch_other"),
+        ("billing_record_id", "other"),
+        ("idempotency_key", "new-key"),
+        ("attempted_at", "2026-10-12T00:00:00+00:00"),
+    ],
+)
+def test_refund_and_reversal_checkpoints_preserve_immutable_owner_authority(
+    bundle, side, field, value
+):
+    row = bundle["stripe_runs"][0]
+    authority = (
+        row["refund"]
+        if side == "refund"
+        else row["refund"]["transfer_outcome"]["owner_reversal"]
+    )
+    authority["dispatch_checkpoint"][field] = value
+    assert any("immutable owner" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("missing", ["dispatch_plan", "dispatch_checkpoint"])
+def test_successful_native_reversal_requires_deployed_owner_recovery(bundle, missing):
+    bundle["stripe_runs"][0]["refund"]["transfer_outcome"]["owner_reversal"].pop(
+        missing
+    )
+    assert any("reversal" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("tie", ["charge", "billing", "lease"])
+def test_global_inventory_rejects_duplicate_transfers_to_other_accounts(bundle, tie):
+    row = bundle["stripe_runs"][0]
+    extra = deepcopy(row["transfer_inventory"]["data"][0])
+    extra.update(id="tr_otherDestination", destination="acct_other")
+    extra["metadata"] = {k: "other" for k in extra["metadata"]}
+    extra["source_transaction"] = "ch_other"
+    if tie == "charge":
+        extra["source_transaction"] = row["connect_transfer"]["source_transaction"]
+    else:
+        key = "billing_record_id" if tie == "billing" else "lease_id"
+        extra["metadata"][key] = row[key]
+    row["transfer_inventory"]["data"].append(extra)
+    assert any("exactly one provider transfer" in e for e in check(bundle))
+
+
+def test_complete_platform_inventory_can_include_unrelated_transfer(bundle):
+    row = bundle["stripe_runs"][0]
+    extra = deepcopy(row["transfer_inventory"]["data"][0])
+    extra.update(
+        id="tr_unrelated",
+        destination="acct_unrelated",
+        source_transaction="ch_unrelated",
+        metadata={},
+    )
+    row["transfer_inventory"]["data"].append(extra)
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("destination", "acct_host"),
+        ("scope", "destination"),
+        ("filters", {}),
+        ("window_start_at", "2026-10-12T04:59:59+00:00"),
+    ],
+)
+def test_global_inventory_must_span_every_destination_since_original_attempt(
+    bundle, field, value
+):
+    bundle["stripe_runs"][0]["transfer_inventory"][field] = value
+    assert any("transfer inventory" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("stripe_account_id", "acct_other"),
+        ("attempt_id", "other"),
+        ("owner_sub", "other-owner"),
+        ("host_org_id", "other-host"),
+        ("tenant_id", "other-tenant"),
+    ],
+)
+def test_agx64_enrollment_cannot_borrow_another_host_payout(bundle, field, value):
+    bundle["enrollment"][field] = value
+    assert any("enrollment" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("delivered_compute_cents", False),
+        (
+            "tax_allocation",
+            {
+                "delivered_compute_cents": 300,
+                "retained_tax_cents": False,
+                "refund_compute_cents": 100,
+                "refund_tax_cents": 0,
+                "refund_total_cents": 100,
+                "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+            },
+        ),
+    ],
+)
+def test_normalized_owner_money_plans_preserve_integer_types(bundle, field, value):
+    row = (
+        bundle["repeated_mismatch"]["attempts"][0]
+        if field == "delivered_compute_cents"
+        else bundle["stripe_runs"][0]
+    )
+    row["refund"]["dispatch_plan"][field] = value
+    assert any("immutable owner" in e for e in check(bundle))
