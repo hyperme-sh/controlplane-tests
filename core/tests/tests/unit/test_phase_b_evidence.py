@@ -130,10 +130,36 @@ def record(name, hour=1, **fields):
             livemode=False,
             currency="usd",
         )
+        result["payment"].update(
+            intent={
+                "id": payment_id,
+                "status": "succeeded",
+                "livemode": False,
+                "currency": "usd",
+                "amount_received": 400,
+                "latest_charge": charge_id,
+                "metadata": {
+                    "tenant_id": scope["tenant_id"],
+                    "billing_record_id": scope["billing_record_id"],
+                },
+            },
+            charge={
+                "id": charge_id,
+                "payment_intent": payment_id,
+                "status": "succeeded",
+                "paid": True,
+                "captured": True,
+                "livemode": False,
+                "currency": "usd",
+                "amount": 400,
+            },
+        )
+        result["connect_transfer"]["source_transaction"] = charge_id
         result["settlement"].update(
             captured_cents=400,
             retained_cents=300,
             refund_due_cents=100,
+            refund_idempotency_key="hm-refund-" + token,
             post_refund_host_payable_cents=80,
             reversal_due_cents=20,
             payment_intent_id=payment_id,
@@ -145,6 +171,11 @@ def record(name, hour=1, **fields):
             recorded_at=(at - timedelta(seconds=5)).isoformat(),
             **scope,
             refund_id=refund_id,
+            created_at=(at - timedelta(seconds=8)).isoformat(),
+            metadata={
+                "billing_record_id": scope["billing_record_id"],
+                "idempotency_key": "hm-refund-" + token,
+            },
             payment_intent_id=payment_id,
             charge_id=charge_id,
             amount_cents=100,
@@ -1001,6 +1032,7 @@ def test_platform_loss_after_short_balance_requires_completed_owner_record(bundl
     outcome.update(
         kind="platform_loss",
         reversal_id=None,
+        balance_transaction=None,
         reversed_cents=0,
         platform_loss_cents=20,
         reversal_refused=True,
@@ -1024,6 +1056,7 @@ def test_no_reversal_only_when_settlement_preserves_host_share(bundle):
     outcome.update(
         kind="not_required",
         reversal_id=None,
+        balance_transaction=None,
         reversed_cents=0,
         platform_loss_cents=0,
         reversal_due_cents=0,
@@ -1054,6 +1087,10 @@ def test_supported_original_charge_and_refund_ids_pass(
     row = bundle["stripe_runs"][0]
     for key in ("payment", "settlement", "refund"):
         row[key]["charge_id"] = charge_prefix + "_supported"
+    row["payment"]["intent"]["latest_charge"] = row["payment"]["charge"]["id"] = row[
+        "payment"
+    ]["charge_id"]
+    row["connect_transfer"]["source_transaction"] = row["payment"]["charge_id"]
     row["refund"]["refund_id"] = refund_prefix + "_supported"
     row["refund"]["transfer_outcome"]["refund_id"] = row["refund"]["refund_id"]
     assert check(bundle) == []
@@ -1069,4 +1106,117 @@ def test_provider_refund_cannot_be_reused_for_another_billing_record(bundle):
 def test_refund_before_original_transfer_is_not_the_required_journey(bundle):
     row = bundle["stripe_runs"][0]
     row["refund"]["recorded_at"] = row["settlement"]["recorded_at"]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "object_name,field,value",
+    [
+        ("intent", "status", "requires_payment_method"),
+        ("intent", "latest_charge", "py_other"),
+        ("intent", "amount_received", 1),
+        ("charge", "paid", False),
+        ("charge", "captured", False),
+        ("charge", "status", "failed"),
+        ("charge", "payment_intent", "pi_other"),
+        ("charge", "amount", 1),
+    ],
+)
+def test_provider_payment_contradictions_cannot_pass_normalized_capture(
+    bundle, object_name, field, value
+):
+    bundle["stripe_runs"][0]["payment"][object_name][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["intent", "charge"])
+def test_raw_provider_payment_state_is_required(bundle, key):
+    del bundle["stripe_runs"][0]["payment"][key]
+    assert check(bundle)
+
+
+def test_refund_creation_before_transfer_cannot_hide_behind_later_observation(bundle):
+    row = bundle["stripe_runs"][0]
+    row["refund"]["created_at"] = row["settlement"]["recorded_at"]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("field", ["created_at", "metadata"])
+def test_refund_provider_time_and_metadata_are_required(bundle, field):
+    del bundle["stripe_runs"][0]["refund"][field]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("billing_record_id", "unrelated"), ("idempotency_key", "manually-created")],
+)
+def test_frozen_refund_request_must_match_provider_metadata(bundle, field, value):
+    bundle["stripe_runs"][0]["refund"]["metadata"][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("reversal_id", "trr_success"), ("balance_transaction", "txn_success")],
+)
+def test_platform_loss_cannot_also_claim_successful_reversal_identifiers(
+    bundle, field, value
+):
+    outcome = bundle["stripe_runs"][0]["refund"]["transfer_outcome"]
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        balance_transaction=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        reversal_refused=True,
+        reason="insufficient_connect_balance",
+        operator_visible=True,
+        financial_state="recorded",
+        refunded_from_platform_cents=100,
+        loss_record="owner-loss",
+    )
+    assert check(bundle) == []
+    outcome[field] = value
+    assert check(bundle)
+
+
+def test_unrelated_source_charge_cannot_fund_recovered_transfer(bundle):
+    bundle["stripe_runs"][0]["connect_transfer"]["source_transaction"] = "py_other"
+    assert check(bundle)
+
+
+def test_expanded_latest_charge_reference_matches_observed_charge(bundle):
+    payment = bundle["stripe_runs"][0]["payment"]
+    payment["intent"]["latest_charge"] = {"id": payment["charge_id"]}
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "billing_record_id"])
+def test_provider_payment_metadata_cannot_name_another_owner(bundle, field):
+    bundle["stripe_runs"][0]["payment"]["intent"]["metadata"][field] = "another-owner"
+    assert check(bundle)
+
+
+def test_refund_provider_creation_must_not_follow_its_observation(bundle):
+    row = bundle["stripe_runs"][0]
+    row["refund"]["created_at"] = row["recorded_at"]
+    assert check(bundle)
+
+
+def test_loss_outcome_cannot_preserve_reversal_balance_transaction(bundle):
+    outcome = bundle["stripe_runs"][0]["refund"]["transfer_outcome"]
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        reversal_refused=True,
+        reason="insufficient_connect_balance",
+        operator_visible=True,
+        financial_state="recorded",
+        refunded_from_platform_cents=100,
+        loss_record="owner-loss",
+    )
     assert check(bundle)
