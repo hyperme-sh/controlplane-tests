@@ -415,6 +415,26 @@ def record(name, hour=1, **fields):
                 "enrollment_attempt_id": "original",
             },
         )
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        result["readiness"]["platform_payout_schedule"] = record(
+            "platform-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=120)).isoformat(),
+            account_id="acct_platform",
+            livemode=False,
+            source="stripe_platform_account",
+            schedule_interval="manual",
+        )
+    if name.startswith("stripe-"):
+        result["payment"]["intent"].update(object="payment_intent", amount=400)
+        result["payment"]["charge"].update(
+            object="charge",
+            amount_captured=400,
+            created=int((at - timedelta(seconds=190)).timestamp()),
+        )
+        result["payment"]["charge"]["payment_method_details"]["crypto"][
+            "transaction_hash"
+        ] = "0x" + "ef" * 32
     return result
 
 
@@ -898,6 +918,16 @@ def bundle():
             for k, v in receipt.items()
             if k not in ("id", "url", "revision", "recorded_at", "passed")
         },
+    )
+    result["fiat_rollout"]["platform_account_id"] = "acct_platform"
+    result["fiat_rollout"]["platform_payout_schedule"] = record(
+        "platform-rollout",
+        0,
+        recorded_at="2026-10-12T00:20:00+00:00",
+        account_id="acct_platform",
+        livemode=False,
+        source="stripe_platform_account",
+        schedule_interval="manual",
     )
     return result
 
@@ -2647,3 +2677,187 @@ def test_provider_error_request_cannot_be_reused_for_another_loss(bundle):
         "request_id"
     ]
     assert any("provider error request reused" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("amount", [None, 1, True])
+def test_capture_requires_full_typed_provider_amount_captured(bundle, amount):
+    bundle["stripe_runs"][0]["payment"]["charge"]["amount_captured"] = amount
+    assert any("paid/captured succeeded charge" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("value", [None, "0x" + "0" * 64, "bad", "0x12"])
+def test_capture_requires_nonzero_provider_transaction_hash(bundle, value):
+    bundle["stripe_runs"][0]["payment"]["charge"]["payment_method_details"]["crypto"][
+        "transaction_hash"
+    ] = value
+    assert any("nonzero provider transaction hash" in e for e in check(bundle))
+
+
+def test_simulation_marker_does_not_authorize_itself(bundle):
+    from phase_b_capture_contract import SANDBOX_SUCCESS_MARKER
+
+    bundle["stripe_runs"][0]["payment"]["charge"]["payment_method_details"]["crypto"][
+        "transaction_hash"
+    ] = SANDBOX_SUCCESS_MARKER
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [("schedule_interval", "daily"), ("account_id", "acct_host"), ("livemode", True)],
+)
+def test_platform_payout_schedule_is_separate_from_host_controls(bundle, key, value):
+    bundle["fiat_rollout"]["platform_payout_schedule"][key] = value
+    assert any("platform manual payout schedule" in e for e in check(bundle))
+
+
+def test_platform_schedule_must_be_rechecked_before_transfer(bundle):
+    bundle["gateway_runs"][0]["readiness"]["platform_payout_schedule"][
+        "schedule_interval"
+    ] = "daily"
+    assert any("platform manual payout schedule" in e for e in check(bundle))
+
+
+def standalone_fees(row, *, operator=False, zero=False):
+    final = row["final_accounting"]
+    final["charge_balance_transaction"].update(fee=0, net=row["amount_cents"])
+    final["retained_fee_cost_cents"] = 0 if zero else 10
+    at = datetime.fromisoformat(final["recorded_at"])
+    report = record(
+        "standalone-report-" + row["id"],
+        recorded_at=(at - timedelta(seconds=2)).isoformat(),
+        complete=True,
+        incurred_by=row["charge"]["id"],
+        basis="incurred_at",
+        sha256="b" * 64,
+        rows=[]
+        if zero
+        else [
+            {
+                "line_number": 1,
+                "incurred_by": row["charge"]["id"],
+                "currency": "usd",
+                "amount_cents": 8,
+                "tax_cents": 2,
+            }
+        ],
+    )
+    final["fee_reconciliation"] = record(
+        "fees-" + row["id"],
+        recorded_at=(at - timedelta(seconds=1)).isoformat(),
+        **{
+            k: row[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        },
+        source="operator_reconciliation" if operator else "stripe_all_fees",
+        status="reconciled",
+        charge_id=row["charge"]["id"],
+        refund_id=row["refund"]["refund_id"],
+        owner_checkpoint=final["owner_checkpoint"],
+        currency="usd",
+        livemode=False,
+        total_fee_cents=final["retained_fee_cost_cents"],
+        report=report,
+        operator_sub="test-operator" if operator else None,
+        approved=operator,
+        reason="Reviewed complete charge-attributed report" if operator else None,
+    )
+    if zero:
+        final["fee_reconciliation"]["zero_fee_confirmation"] = record(
+            "zero-confirmation-" + row["id"],
+            recorded_at=(at - timedelta(seconds=2)).isoformat(),
+            charge_id=row["charge"]["id"],
+            source="stripe_support",
+            zero_cost_confirmed=True,
+            fee_cents=0,
+            provider_reference="test-support-reference",
+        )
+    return final["fee_reconciliation"]
+
+
+@pytest.mark.parametrize("operator,zero", [(False, False), (True, False), (True, True)])
+def test_zero_inline_fee_accepts_bound_complete_standalone_or_operator_evidence(
+    bundle, operator, zero
+):
+    standalone_fees(
+        bundle["repeated_mismatch"]["attempts"][0], operator=operator, zero=zero
+    )
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "estimate"),
+        ("charge_id", "py_other"),
+        ("total_fee_cents", 1),
+        ("owner_checkpoint", "unrelated"),
+    ],
+)
+def test_standalone_fee_evidence_is_bound_not_an_estimate(bundle, field, value):
+    fees = standalone_fees(bundle["repeated_mismatch"]["attempts"][0])
+    fees[field] = value
+    assert any("standalone-fee or operator reconciliation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("incurred_by", "py_other"), ("amount_cents", 1), ("tax_cents", True)],
+)
+def test_standalone_fee_rows_must_reconcile_the_original_charge(bundle, field, value):
+    fees = standalone_fees(bundle["repeated_mismatch"]["attempts"][0])
+    fees["report"]["rows"][0][field] = value
+    assert check(bundle)
+
+
+def test_zero_inline_fee_without_reconciliation_remains_unresolved(bundle):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    row["final_accounting"]["charge_balance_transaction"].update(fee=0, net=400)
+    assert any("zero-inline fees require" in e for e in check(bundle))
+
+
+def test_empty_fee_report_does_not_establish_zero_cost(bundle):
+    fees = standalone_fees(
+        bundle["repeated_mismatch"]["attempts"][0], operator=True, zero=True
+    )
+    fees.pop("zero_fee_confirmation")
+    assert any("empty report is not zero-cost proof" in e for e in check(bundle))
+
+
+def test_owner_authorized_simulation_marker_can_certify_sandbox_capture(bundle):
+    from phase_b_capture_contract import SANDBOX_SUCCESS_MARKER
+
+    row = bundle["stripe_runs"][0]
+    payment = row["payment"]
+    at = datetime.fromisoformat(row["recorded_at"])
+    binding = {
+        "actor_sub": payment["actor_sub"],
+        "operation_id": "55555555-5555-5555-5555-555555555555",
+        "intent_id": payment["payment_intent_id"],
+        "attempted_at": (at - timedelta(seconds=250)).isoformat(),
+    }
+    binding["simulation"] = {
+        "version": 1,
+        "tenant_id": row["tenant_id"],
+        "billing_record_id": row["billing_record_id"],
+        "lease_id": row["lease_id"],
+        "actor_sub": payment["actor_sub"],
+        "intent_id": payment["payment_intent_id"],
+        "wallet": payment["payer_snapshot"]["address"],
+        "deposit_operation_id": binding["operation_id"],
+        "operation_id": "66666666-6666-6666-6666-666666666666",
+        "attempted_at": (at - timedelta(seconds=210)).isoformat(),
+        "authorized_from_status": "requires_action",
+        "outcome": "success",
+    }
+    payment["simulation_authorization"] = record(
+        "sim-authority",
+        recorded_at=(at - timedelta(seconds=209)).isoformat(),
+        deposit_binding=binding,
+    )
+    payment["charge"]["payment_method_details"]["crypto"]["transaction_hash"] = (
+        SANDBOX_SUCCESS_MARKER
+    )
+    assert check(bundle) == []
+    binding["simulation"]["billing_record_id"] = "wrong"
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
