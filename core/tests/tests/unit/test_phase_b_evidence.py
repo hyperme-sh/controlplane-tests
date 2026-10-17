@@ -469,6 +469,8 @@ def record(name, hour=1, **fields):
         payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     if name.startswith("stripe-"):
         sync_bank_to_outcome(result)
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        bind_bank_dispatch(result, result["bank_payout"])
     return result
 
 
@@ -516,6 +518,72 @@ def sync_bank_to_outcome(row):
                 "available_at": reversal["created_at"],
             }
         )
+
+    if "bank_dispatch_plan" in row:
+        bind_bank_dispatch(row, row["bank_payout"])
+
+
+def bind_bank_dispatch(row, payout):
+    token = row["id"]
+    created = datetime.fromisoformat(payout["created_at"])
+    scope = {
+        k: row[k] for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+    }
+    plan_id, operation_id = (
+        str(uuid5(NAMESPACE_URL, prefix + token))
+        for prefix in ("bank-plan", "bank-operation")
+    )
+    key = "hm-bank-payout-" + operation_id
+    frozen = scope | {
+        "payment_intent_id": row["payment"]["payment_intent_id"],
+        "charge_id": row["payment"]["charge_id"],
+        "transfer_id": row["connect_transfer"]["id"],
+        "account_id": payout["account_id"],
+        "bank_id": payout["bank_id"],
+        "amount_cents": payout["amount_cents"],
+        "currency": "usd",
+        "livemode": False,
+        "plan_id": plan_id,
+        "operation_id": operation_id,
+        "idempotency_key": key,
+    }
+    row["bank_dispatch_plan"] = record(
+        "bank-plan-" + token,
+        recorded_at=(created - timedelta(seconds=4)).isoformat(),
+        source="payment_bank_payout_plan",
+        **frozen,
+    )
+    metadata = scope | {
+        k: frozen[k] for k in ("plan_id", "operation_id", "transfer_id", "charge_id")
+    }
+    payout["metadata"] = deepcopy(metadata)
+    row["bank_dispatch_checkpoint"] = record(
+        "bank-checkpoint-" + token,
+        recorded_at=(created + timedelta(seconds=2)).isoformat(),
+        source="payment_bank_dispatch",
+        status="bound",
+        **frozen,
+        payout_id=payout["payout_id"],
+        attempted_at=(created - timedelta(seconds=2)).isoformat(),
+        provider_request=record(
+            "bank-request-" + token,
+            recorded_at=(created + timedelta(seconds=1)).isoformat(),
+            source="stripe_request",
+            request_id="req_" + uuid5(NAMESPACE_URL, "bank-request" + token).hex,
+            method="POST",
+            path="/v1/payouts",
+            livemode=False,
+            account_id=payout["account_id"],
+            idempotency_key=key,
+            payout_id=payout["payout_id"],
+            parameters={
+                "amount": payout["amount_cents"],
+                "currency": "usd",
+                "destination": payout["bank_id"],
+                "metadata": metadata,
+            },
+        ),
+    )
 
 
 def fresh_payout_readiness(row):
@@ -646,6 +714,7 @@ def refusal_record(name, hour, *, mismatch=False):
             "net": 390,
             "currency": "usd",
             "type": "charge",
+            "status": "available",
         }
         refund_tx = {
             "id": "txn_mismatchrefund" + token,
@@ -655,6 +724,7 @@ def refusal_record(name, hour, *, mismatch=False):
             "net": -400,
             "currency": "usd",
             "type": "refund",
+            "status": "available",
         }
         row["charge"]["balance_transaction"] = charge_tx["id"]
         metadata = {
@@ -897,6 +967,8 @@ def bundle():
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
                     "attempt_id": "original",
                     "stripe_account_id": "acct_host",
+                    "payout_method": "fiat_bank",
+                    "eligibility_rule_version": "fiat-us/v1",
                 }
             ],
             enrollments_after=[
@@ -905,6 +977,8 @@ def bundle():
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
                     "attempt_id": "original",
                     "stripe_account_id": "acct_host",
+                    "payout_method": "fiat_bank",
+                    "eligibility_rule_version": "fiat-us/v1",
                 }
             ],
         ),
@@ -1134,6 +1208,7 @@ def bundle():
     failure["payout_readiness"] = synthetic["payout_readiness"]
     failure["payout_readiness"].update(failure_scope, bank_id=failure["bank_id"])
     failure["destination"] = failure["bank_id"]
+    bind_bank_dispatch(failure, failure)
     repeated = result["repeated_mismatch"]
     repeated["policy_decision"] = record(
         "policy-repeat-decision",
@@ -1941,6 +2016,7 @@ def test_supported_original_charge_and_refund_ids_pass(
     row["refund"]["inventory"]["data"][0].update(
         id=row["refund"]["refund_id"], charge=row["payment"]["charge_id"]
     )
+    bind_bank_dispatch(row, row["bank_payout"])
     assert check(bundle) == []
 
 
@@ -3458,3 +3534,222 @@ def test_simulation_outer_binding_must_match_authoritative_payment(
     binding = authorize_simulated_fixture(row)
     binding[field] = value
     assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field", ["charge_balance_transaction", "refund_balance_transaction"]
+)
+@pytest.mark.parametrize("status", [None, "failed", "succeeded", "", True])
+def test_mismatch_fee_snapshots_require_native_provider_status(bundle, field, status):
+    tx = bundle["repeated_mismatch"]["attempts"][0]["final_accounting"][field]
+    if status is None:
+        tx.pop("status")
+    else:
+        tx["status"] = status
+    assert any("provider balance transaction accounting" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field", ["charge_balance_transaction", "refund_balance_transaction"]
+)
+@pytest.mark.parametrize("status", ["pending", "available"])
+def test_mismatch_fee_native_pending_or_available_statuses_pass(bundle, field, status):
+    bundle["repeated_mismatch"]["attempts"][0]["final_accounting"][field]["status"] = (
+        status
+    )
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field", ["charge_balance_transaction", "refund_balance_transaction"]
+)
+def test_mismatch_fee_exchange_conversion_cannot_certify_usd_cost(bundle, field):
+    bundle["repeated_mismatch"]["attempts"][0]["final_accounting"][field][
+        "exchange_rate"
+    ] = 1.0
+    assert any("provider balance transaction accounting" in e for e in check(bundle))
+
+
+def bank_case(bundle, group):
+    return bundle[group] if group == "failed_bank_payout" else bundle[group][0]
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_plan",
+        "missing_checkpoint",
+        "scope",
+        "amount",
+        "bank",
+        "operation",
+        "key",
+        "checkpoint_key",
+        "checkpoint_scope",
+        "checkpoint_payout",
+        "late_plan",
+        "late_checkpoint",
+    ],
+)
+def test_bank_payout_requires_its_pre_io_owner_plan_and_dispatch_checkpoint(
+    bundle, group, mutation
+):
+    row = bank_case(bundle, group)
+    plan, checkpoint = row["bank_dispatch_plan"], row["bank_dispatch_checkpoint"]
+    if mutation == "missing_plan":
+        row.pop("bank_dispatch_plan")
+    elif mutation == "missing_checkpoint":
+        row.pop("bank_dispatch_checkpoint")
+    elif mutation == "scope":
+        plan["billing_record_id"] = "other"
+    elif mutation == "amount":
+        plan["amount_cents"] = 1
+    elif mutation == "bank":
+        plan["bank_id"] = "ba_other"
+    elif mutation == "operation":
+        plan["operation_id"] = "invalid"
+    elif mutation == "key":
+        plan.pop("idempotency_key")
+    elif mutation == "checkpoint_key":
+        checkpoint["idempotency_key"] = "another-key"
+    elif mutation == "checkpoint_scope":
+        checkpoint["lease_id"] = "other"
+    elif mutation == "checkpoint_payout":
+        checkpoint["payout_id"] = "po_other"
+    elif mutation == "late_plan":
+        plan["recorded_at"] = row["recorded_at"]
+    elif mutation == "late_checkpoint":
+        checkpoint["recorded_at"] = "2026-10-13T08:00:00+00:00"
+    assert any(
+        "bank plan" in e or "bank plan/key" in e or "bank plan must persist" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_request",
+        "request_key",
+        "request_id",
+        "request_account",
+        "request_amount",
+        "request_bank",
+        "request_metadata",
+        "payout_metadata",
+        "request_time",
+    ],
+)
+def test_bank_dispatch_must_match_native_provider_request_identity(
+    bundle, group, mutation
+):
+    row = bank_case(bundle, group)
+    payout = row if group == "failed_bank_payout" else row["bank_payout"]
+    checkpoint = row["bank_dispatch_checkpoint"]
+    request = checkpoint["provider_request"]
+    if mutation == "missing_request":
+        checkpoint.pop("provider_request")
+    elif mutation == "request_key":
+        request["idempotency_key"] = "different-key"
+    elif mutation == "request_id":
+        request.pop("request_id")
+    elif mutation == "request_account":
+        request["account_id"] = "acct_other"
+    elif mutation == "request_amount":
+        request["parameters"]["amount"] = 1
+    elif mutation == "request_bank":
+        request["parameters"]["destination"] = "ba_other"
+    elif mutation == "request_metadata":
+        request["parameters"]["metadata"]["plan_id"] = "other"
+    elif mutation == "payout_metadata":
+        payout["metadata"] = {}
+    elif mutation == "request_time":
+        request["recorded_at"] = row["started_at"]
+    assert any(
+        "provider request" in e or "bank plan must persist" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("field", ["plan_id", "operation_id", "idempotency_key"])
+def test_bank_retry_authority_cannot_be_reused_for_another_payout(bundle, field):
+    first, second = bundle["stripe_runs"][:2]
+    value = first["bank_dispatch_plan"][field]
+    second["bank_dispatch_plan"][field] = second["bank_dispatch_checkpoint"][field] = (
+        value
+    )
+    request = second["bank_dispatch_checkpoint"]["provider_request"]
+    if field == "idempotency_key":
+        request[field] = value
+    else:
+        request["parameters"]["metadata"][field] = value
+        second["bank_payout"]["metadata"][field] = value
+    assert any("bank plan/operation/key reused" in e for e in check(bundle))
+
+
+def test_legacy_missing_policy_backfills_only_fixed_native_migration_defaults(bundle):
+    before = bundle["fiat_rollout"]["enrollments_before"][0]
+    before.pop("payout_method")
+    before.pop("eligibility_rule_version")
+    assert check(bundle) == []
+    bundle["fiat_rollout"]["enrollments_after"][0].update(
+        payout_method="usdc", eligibility_rule_version="usdc-stablecoin/v1"
+    )
+    assert any("history was lost or replaced" in e for e in check(bundle))
+
+
+def add_historical_usdc_enrollment(bundle):
+    row = {
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "host_org_id": "99999999-9999-9999-9999-999999999999",
+        "attempt_id": "historical-usdc",
+        "stripe_account_id": "acct_historicalusdc",
+        "payout_method": "usdc",
+        "eligibility_rule_version": "usdc-stablecoin/v1",
+    }
+    for stage in ("enrollments_before", "enrollments_after"):
+        bundle["fiat_rollout"][stage].append(deepcopy(row))
+
+
+def test_existing_usdc_history_survives_fiat_default_rollout(bundle):
+    add_historical_usdc_enrollment(bundle)
+    assert check(bundle) == []
+    bundle["fiat_rollout"]["enrollments_after"][-1].update(
+        payout_method="fiat_bank", eligibility_rule_version="fiat-us/v1"
+    )
+    assert any("history was lost or replaced" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("stage", ["enrollments_before", "enrollments_after"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_method",
+        "missing_rule",
+        "null_method",
+        "null_rule",
+        "unknown_method",
+        "unknown_rule",
+        "wrong_pair",
+    ],
+)
+def test_rollout_requires_complete_native_method_and_admission_policy(
+    bundle, stage, mutation
+):
+    row = bundle["fiat_rollout"][stage][0]
+    if mutation == "missing_method":
+        row.pop("payout_method")
+    elif mutation == "missing_rule":
+        row.pop("eligibility_rule_version")
+    elif mutation == "null_method":
+        row["payout_method"] = None
+    elif mutation == "null_rule":
+        row["eligibility_rule_version"] = None
+    elif mutation == "unknown_method":
+        row["payout_method"] = "other"
+    elif mutation == "unknown_rule":
+        row["eligibility_rule_version"] = "other/v1"
+    else:
+        row["eligibility_rule_version"] = "usdc-stablecoin/v1"
+    assert any("persisted payout method/rule" in e for e in check(bundle))
