@@ -112,6 +112,62 @@ def record(name, hour=1, **fields):
                 transfer_id="tr_" + token,
             ),
         )
+    if name.startswith("stripe-"):
+        scope = {
+            key: result[key]
+            for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        }
+        payment_id, charge_id, refund_id = "pi_" + token, "py_" + token, "pyr_" + token
+        result["payment"] = record(
+            "capture-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=180)).isoformat(),
+            **scope,
+            payment_intent_id=payment_id,
+            charge_id=charge_id,
+            amount_cents=400,
+            captured=True,
+            livemode=False,
+            currency="usd",
+        )
+        result["settlement"].update(
+            captured_cents=400,
+            retained_cents=300,
+            refund_due_cents=100,
+            post_refund_host_payable_cents=80,
+            reversal_due_cents=20,
+            payment_intent_id=payment_id,
+            charge_id=charge_id,
+        )
+        result["refund"] = record(
+            "refund-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=5)).isoformat(),
+            **scope,
+            refund_id=refund_id,
+            payment_intent_id=payment_id,
+            charge_id=charge_id,
+            amount_cents=100,
+            status="succeeded",
+            currency="usd",
+            livemode=False,
+            transfer_outcome=record(
+                "refund-outcome-" + name,
+                hour,
+                recorded_at=(at - timedelta(seconds=4)).isoformat(),
+                **scope,
+                kind="reversed",
+                refund_id=refund_id,
+                transfer_id="tr_" + token,
+                reversal_due_cents=20,
+                reversed_cents=20,
+                platform_loss_cents=0,
+                reversal_id="trr_" + token,
+                balance_transaction="txn_" + token,
+                currency="usd",
+                livemode=False,
+            ),
+        )
     return result
 
 
@@ -881,4 +937,136 @@ def test_host_fee_deduction_cannot_pass_even_with_full_declared_bank_amount(
     bundle, value
 ):
     bundle["gateway_runs"][0]["bank_payout"]["host_deduction_cents"] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("key", ["payment", "refund"])
+def test_refund_stage_boolean_is_not_financial_evidence(bundle, key):
+    del bundle["stripe_runs"][0][key]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("refund_id", "unknown"),
+        ("charge_id", "py_unrelated"),
+        ("payment_intent_id", "pi_unrelated"),
+        ("billing_record_id", "99999999-9999-9999-9999-999999999999"),
+        ("amount_cents", 1),
+        ("amount_cents", True),
+        ("status", "pending"),
+        ("status", "failed"),
+        ("livemode", True),
+    ],
+)
+def test_refund_must_match_original_payment_and_settled_amount(bundle, field, value):
+    bundle["stripe_runs"][0]["refund"][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("captured_cents", 399),
+        ("retained_cents", 299),
+        ("refund_due_cents", 1),
+        ("post_refund_host_payable_cents", 79),
+        ("reversal_due_cents", 1),
+    ],
+)
+def test_refund_settlement_equations_are_required(bundle, field, value):
+    bundle["stripe_runs"][0]["settlement"][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("transfer_id", "tr_unrelated"),
+        ("refund_id", "pyr_unrelated"),
+        ("reversed_cents", 1),
+        ("reversal_id", "unobserved"),
+        ("platform_loss_cents", 1),
+    ],
+)
+def test_matching_transfer_reversal_is_not_inferred(bundle, field, value):
+    bundle["stripe_runs"][0]["refund"]["transfer_outcome"][field] = value
+    assert check(bundle)
+
+
+def test_platform_loss_after_short_balance_requires_completed_owner_record(bundle):
+    row = bundle["stripe_runs"][0]
+    outcome = row["refund"]["transfer_outcome"]
+    outcome.update(
+        kind="platform_loss",
+        reversal_id=None,
+        reversed_cents=0,
+        platform_loss_cents=20,
+        reversal_refused=True,
+        reason="insufficient_connect_balance",
+        operator_visible=True,
+        financial_state="recorded",
+        refunded_from_platform_cents=100,
+        loss_record="billing-owner-loss-checkpoint",
+    )
+    assert check(bundle) == []
+    outcome["operator_visible"] = False
+    assert check(bundle)
+    outcome["operator_visible"] = True
+    outcome["financial_state"] = "planned"
+    assert check(bundle)
+
+
+def test_no_reversal_only_when_settlement_preserves_host_share(bundle):
+    row = bundle["stripe_runs"][0]
+    outcome = row["refund"]["transfer_outcome"]
+    outcome.update(
+        kind="not_required",
+        reversal_id=None,
+        reversed_cents=0,
+        platform_loss_cents=0,
+        reversal_due_cents=0,
+    )
+    assert check(bundle)
+    row["settlement"].update(reversal_due_cents=0, post_refund_host_payable_cents=100)
+    assert check(bundle) == []
+
+
+def test_unrelated_payment_cannot_be_shared_across_lease_refunds(bundle):
+    first, second = bundle["stripe_runs"][:2]
+    for field in ("payment_intent_id", "charge_id"):
+        for key in ("payment", "settlement", "refund"):
+            second[key][field] = first["payment"][field]
+    assert any("reused across financial scopes" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("malformed", [None, [], True])
+def test_malformed_refund_outcome_fails_closed(bundle, malformed):
+    bundle["stripe_runs"][0]["refund"]["transfer_outcome"] = malformed
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("charge_prefix,refund_prefix", [("ch", "re"), ("py", "pyr")])
+def test_supported_original_charge_and_refund_ids_pass(
+    bundle, charge_prefix, refund_prefix
+):
+    row = bundle["stripe_runs"][0]
+    for key in ("payment", "settlement", "refund"):
+        row[key]["charge_id"] = charge_prefix + "_supported"
+    row["refund"]["refund_id"] = refund_prefix + "_supported"
+    row["refund"]["transfer_outcome"]["refund_id"] = row["refund"]["refund_id"]
+    assert check(bundle) == []
+
+
+def test_provider_refund_cannot_be_reused_for_another_billing_record(bundle):
+    first, second = bundle["stripe_runs"][:2]
+    second["refund"]["refund_id"] = first["refund"]["refund_id"]
+    second["refund"]["transfer_outcome"]["refund_id"] = first["refund"]["refund_id"]
+    assert any("reused across financial scopes" in error for error in check(bundle))
+
+
+def test_refund_before_original_transfer_is_not_the_required_journey(bundle):
+    row = bundle["stripe_runs"][0]
+    row["refund"]["recorded_at"] = row["settlement"]["recorded_at"]
     assert check(bundle)
