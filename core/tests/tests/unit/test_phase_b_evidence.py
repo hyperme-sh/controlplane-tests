@@ -435,7 +435,42 @@ def record(name, hour=1, **fields):
         result["payment"]["charge"]["payment_method_details"]["crypto"][
             "transaction_hash"
         ] = "0x" + "ef" * 32
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        result["bank_payout"]["destination"] = result["bank_payout"]["bank_id"]
+        result["payout_readiness"] = fresh_payout_readiness(result)
+    if name.startswith("stripe-"):
+        payment = result["payment"]
+        payment["intent"]["metadata"].update(
+            lease_id=result["lease_id"], payment_flow="deposit"
+        )
+        payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     return result
+
+
+def fresh_payout_readiness(row):
+    ready = deepcopy(row["readiness"])
+
+    def shift(value):
+        if isinstance(value, dict):
+            if "revision" in value and "url" in value:
+                value["id"] += "-payout"
+                value["recorded_at"] = (
+                    datetime.fromisoformat(value["recorded_at"]) + timedelta(seconds=85)
+                ).isoformat()
+            for child in value.values():
+                shift(child)
+        elif isinstance(value, list):
+            for child in value:
+                shift(child)
+
+    shift(ready)
+    ready.update(
+        {
+            k: row[k]
+            for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        }
+    )
+    return ready
 
 
 def refusal_record(name, hour, *, mismatch=False):
@@ -610,6 +645,38 @@ def refusal_record(name, hour, *, mismatch=False):
             retained_fee_cost_cents=10,
             charge_balance_transaction=charge_tx,
             refund_balance_transaction=refund_tx,
+        )
+    if mismatch:
+        row["intent"].update(object="payment_intent")
+        row["intent"]["metadata"].update(
+            lease_id=scope["lease_id"], payment_flow="deposit"
+        )
+        row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
+        row["charge"].update(
+            object="charge",
+            amount_captured=400,
+            amount_refunded=0,
+            refunded=False,
+            created=int((at - timedelta(seconds=90)).timestamp()),
+        )
+        row["charge"]["payment_method_details"]["crypto"]["transaction_hash"] = (
+            "0x" + "ef" * 32
+        )
+        counter = (
+            int(name.rsplit("-", 1)[-1]) if name.rsplit("-", 1)[-1].isdigit() else 0
+        )
+        row["policy_observation"] = record(
+            "policy-" + name,
+            hour,
+            recorded_at=(at - timedelta(seconds=85)).isoformat(),
+            **scope,
+            source="payment_mismatch_policy",
+            actor_sub=row["actor_sub"],
+            payment_intent_id=intent["id"],
+            event_id=row["provider_event"]["id"],
+            day="2026-10-12",
+            counter_before=counter,
+            counter_after=counter + 1,
         )
     return row
 
@@ -928,6 +995,23 @@ def bundle():
         livemode=False,
         source="stripe_platform_account",
         schedule_interval="manual",
+    )
+    failure["payout_readiness"] = synthetic["payout_readiness"]
+    failure["payout_readiness"].update(failure_scope, bank_id=failure["bank_id"])
+    failure["destination"] = failure["bank_id"]
+    repeated = result["repeated_mismatch"]
+    repeated["policy_decision"] = record(
+        "policy-repeat-decision",
+        8,
+        source="payment_mismatch_policy",
+        actor_sub=repeated["actor_sub"],
+        tenant_id=repeated["tenant_id"],
+        host_org_id=repeated["host_org_id"],
+        day="2026-10-12",
+        mismatches=3,
+        repeat_threshold=3,
+        operator_required=True,
+        reason="repeated_mismatch",
     )
     return result
 
@@ -1340,6 +1424,7 @@ def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
     bundle["stripe_runs"][0]["source_charge_type"] = "non_stablecoin"
     payment = bundle["stripe_runs"][0]["payment"]
     payment["intent"]["metadata"]["payment_rail"] = "stripe_checkout"
+    payment["intent"]["metadata"]["payment_flow"] = "checkout"
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
     payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     assert check(bundle)
@@ -2861,3 +2946,95 @@ def test_owner_authorized_simulation_marker_can_certify_sandbox_capture(bundle):
     assert check(bundle) == []
     binding["simulation"]["billing_record_id"] = "wrong"
     assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("lease_id", "other"), ("payment_flow", "checkout"), ("extra", "unexpected")],
+)
+def test_capture_metadata_matches_the_complete_frozen_lease_plan(bundle, field, value):
+    payment = bundle["stripe_runs"][0]["payment"]
+    payment["intent"]["metadata"][field] = value
+    payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    assert any("full frozen lease/flow/tax metadata" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field", ["object", "amount_captured", "amount_refunded", "refunded", "created"]
+)
+def test_mismatch_capture_is_authoritative_before_quarantine(bundle, field):
+    bundle["repeated_mismatch"]["attempts"][0]["charge"].pop(field)
+    assert any("paid/captured succeeded charge" in e for e in check(bundle))
+
+
+def test_cross_day_mismatches_do_not_establish_repetition(bundle):
+    row = bundle["repeated_mismatch"]["attempts"][1]
+    row["policy_observation"]["day"] = "2026-10-13"
+    assert any("same UTC policy day" in e for e in check(bundle))
+
+
+def test_replayed_server_counter_does_not_increment_repeat_threshold(bundle):
+    observation = bundle["repeated_mismatch"]["attempts"][1]["policy_observation"]
+    observation.update(counter_before=0, counter_after=1)
+    assert any("same UTC policy day" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", "self_declared"),
+        ("actor_sub", "other"),
+        ("mismatches", 1),
+        ("operator_required", False),
+        ("repeat_threshold", 2),
+    ],
+)
+def test_repeat_routing_requires_server_owned_decision(bundle, field, value):
+    bundle["repeated_mismatch"]["policy_decision"][field] = value
+    assert any("authoritative same-day actor counter" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("payouts_enabled", False),
+        ("bank_id", "ba_changed"),
+        ("payout_requirements_clear", False),
+        ("ownership_verified", False),
+        ("billing_record_id", "unrelated"),
+    ],
+)
+def test_payout_time_destination_and_readiness_must_still_match(bundle, field, value):
+    bundle["gateway_runs"][0]["payout_readiness"][field] = value
+    assert any("payout" in e for e in check(bundle))
+
+
+def test_bank_readiness_cannot_be_reused_only_from_before_transfer(bundle):
+    row = bundle["gateway_runs"][0]
+    row["payout_readiness"]["recorded_at"] = row["readiness"]["recorded_at"]
+    assert any("payout-time read must follow transfer" in e for e in check(bundle))
+
+
+def test_waiting_for_funds_requires_another_bank_read_before_payout(bundle):
+    row = bundle["gateway_runs"][0]
+    row["bank_payout"]["created_at"] = (
+        datetime.fromisoformat(row["payout_readiness"]["recorded_at"])
+        + timedelta(minutes=6)
+    ).isoformat()
+    assert any("fresh bank readiness required" in e for e in check(bundle))
+
+
+def test_failed_bank_dispatch_also_requires_payout_time_readiness(bundle):
+    bundle["failed_bank_payout"].pop("payout_readiness")
+    assert any("payout_readiness" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_provider_payout_destination_must_be_the_frozen_bank(bundle, failed):
+    payout = (
+        bundle["failed_bank_payout"]
+        if failed
+        else bundle["gateway_runs"][0]["bank_payout"]
+    )
+    payout["destination"] = "ba_changed"
+    assert check(bundle)
