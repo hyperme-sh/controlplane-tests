@@ -54,9 +54,9 @@ def record(name, hour=1, **fields):
             bank_followup=record(
                 "followup-" + name,
                 hour,
-                recorded_at=(at + timedelta(days=8)).isoformat(),
+                recorded_at=(at + timedelta(days=9)).isoformat(),
                 events_from_at=created_at,
-                events_through_at=(at + timedelta(days=8)).isoformat(),
+                events_through_at=(at + timedelta(days=9)).isoformat(),
                 events_complete=True,
                 later_failure_seen=False,
                 additional_bank_closures_accounted_for=True,
@@ -310,6 +310,7 @@ def record(name, hour=1, **fields):
                     "currency": "usd",
                     "livemode": False,
                     "metadata": deepcopy(result["refund"]["metadata"]),
+                    "created_at": result["refund"]["created_at"],
                 }
             ],
         )
@@ -498,6 +499,8 @@ def sync_bank_to_outcome(row):
         outcome["provider_refusal"]["recorded_at"] = (
             at - timedelta(seconds=5)
         ).isoformat()
+        refund["inventory"]["data"][0]["created_at"] = refund["created_at"]
+        empty_reversals(row)
     if reversed_host:
         reversal = outcome["provider_reversal"]
         reversal["destination_payment_refund"] = (
@@ -521,6 +524,17 @@ def sync_bank_to_outcome(row):
 
     if "bank_dispatch_plan" in row:
         bind_bank_dispatch(row, row["bank_payout"])
+
+
+def empty_reversals(row):
+    row["refund"]["transfer_outcome"]["reversal_inventory"] = record(
+        "empty-reversals-" + row["id"],
+        recorded_at=row["recorded_at"],
+        transfer_id=row["connect_transfer"]["id"],
+        complete=True,
+        has_more=False,
+        data=[],
+    )
 
 
 def bind_bank_dispatch(row, payout):
@@ -645,6 +659,8 @@ def refusal_record(name, hour, *, mismatch=False):
         attempt_id="attempt-" + token,
         payment_intent_id=intent["id"],
         amount_cents=400,
+        subtotal_cents=400,
+        tax_payable=None,
         no_lease_started=True,
         actor_sub="sandbox-actor",
         intent=intent,
@@ -1025,7 +1041,9 @@ def bundle():
         available_cents=0,
         amount_cents=20,
     )
+    empty_reversals(recovery)
     transaction = {
+        "status": "available",
         "id": "txn_platformrefund",
         "source": refund["refund_id"],
         "amount": -100,
@@ -1781,7 +1799,7 @@ def test_stripe_execution_must_follow_fiat_rollout(bundle):
 def test_bank_window_skips_weekends_and_federal_holidays():
     friday = datetime(2026, 12, 18, 12, tzinfo=UTC)
     assert checker.payout_observation_deadline(friday) == datetime(
-        2026, 12, 28, 12, tzinfo=UTC
+        2026, 12, 29, 12, tzinfo=UTC
     )
 
 
@@ -2562,7 +2580,10 @@ def test_platform_loss_cannot_retain_nested_provider_reversal(bundle, key):
     bundle["refund_recovery"]["refund"]["transfer_outcome"][key] = deepcopy(
         bundle["stripe_runs"][0]["refund"]["transfer_outcome"][key]
     )
-    assert any("platform-funded refund, recorded loss" in e for e in check(bundle))
+    assert any(
+        "platform-funded refund, recorded loss" in e or "reversal inventory" in e
+        for e in check(bundle)
+    )
 
 
 @pytest.mark.parametrize("metadata", [None, {}, {"tenant_id": "another"}])
@@ -3753,3 +3774,218 @@ def test_rollout_requires_complete_native_method_and_admission_policy(
     else:
         row["eligibility_rule_version"] = "usdc-stablecoin/v1"
     assert any("persisted payout method/rule" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "expired",
+        "expires_at_checkout",
+        "missing_expiry",
+        "boolean_expiry",
+        "wrong_total",
+        "wrong_revision",
+        "wrong_calculation",
+        "missing_snapshot",
+    ],
+)
+def test_every_stablecoin_capture_requires_its_valid_live_at_creation_payable(
+    bundle, group, mutation
+):
+    row = (
+        bank_case(bundle, group) if group not in ("refund_recovery",) else bundle[group]
+    )
+    paid = row["payment"]
+    payable = paid["tax_payable"]
+    if mutation == "expired":
+        payable["expires_at"] = 1
+    elif mutation == "expires_at_checkout":
+        payable["expires_at"] = int(
+            datetime.fromisoformat(paid["checkout_created_at"]).timestamp()
+        )
+    elif mutation == "missing_expiry":
+        payable.pop("expires_at")
+    elif mutation == "boolean_expiry":
+        payable["expires_at"] = True
+    elif mutation == "wrong_total":
+        payable["total_cents"] = 1
+    elif mutation == "wrong_revision":
+        payable["revision_id"] = "other"
+    elif mutation == "wrong_calculation":
+        payable["calculation_id"] = "taxcalc_other"
+    else:
+        paid.pop("tax_payable")
+    assert any("tax payable" in e for e in check(bundle))
+
+
+def test_valid_checkout_quote_can_expire_before_capture_observation(bundle):
+    paid = bundle["stripe_runs"][0]["payment"]
+    checkout = datetime.fromisoformat(paid["checkout_created_at"])
+    paid["tax_payable"]["expires_at"] = int(
+        (checkout + timedelta(seconds=1)).timestamp()
+    )
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+def test_zero_wallet_cannot_be_the_verified_payer_of_a_successful_capture(
+    bundle, group
+):
+    row = bank_case(bundle, group) if group != "refund_recovery" else bundle[group]
+    paid = row["payment"]
+    paid["payer_snapshot"]["address"] = paid["charge"]["payment_method_details"][
+        "crypto"
+    ]["buyer_address"] = "0x" + "0" * 40
+    assert any("verified payer snapshot" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("status", [None, "failed", "succeeded", True])
+def test_platform_loss_refund_debit_requires_native_transaction_status(bundle, status):
+    tx = bundle["refund_recovery"]["final_accounting"]["refund_balance_transaction"]
+    if status is None:
+        tx.pop("status")
+    else:
+        tx["status"] = status
+    assert any("platform balance debit" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("status", ["pending", "available"])
+def test_recovery_refund_native_statuses_remain_valid(bundle, status):
+    tx = bundle["refund_recovery"]["final_accounting"]["refund_balance_transaction"]
+    tx["status"] = status
+    assert check(bundle) == []
+    tx["exchange_rate"] = 1.0
+    assert any("platform balance debit" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        "gateway_runs",
+        "stripe_runs",
+        "failed_bank_payout",
+        "refund_recovery",
+        "repeated_mismatch",
+    ],
+)
+@pytest.mark.parametrize("when", ["ancient", "before_checkout", "after_event"])
+def test_native_charge_time_binds_the_fresh_checkout_and_event(bundle, group, when):
+    if group == "repeated_mismatch":
+        row = bundle[group]["attempts"][0]
+        charge = row["charge"]
+        checkout = datetime.fromisoformat(row["started_at"])
+        event = datetime.fromisoformat(row["provider_event"]["created_at"])
+    else:
+        row = bank_case(bundle, group) if group != "refund_recovery" else bundle[group]
+        charge = row["payment"]["charge"]
+        checkout = datetime.fromisoformat(row["payment"]["checkout_created_at"])
+        event = datetime.fromisoformat(row["payment"]["capture_event"]["created_at"])
+    charge["created"] = (
+        1
+        if when == "ancient"
+        else int(
+            (
+                checkout - timedelta(seconds=1)
+                if when == "before_checkout"
+                else event + timedelta(seconds=1)
+            ).timestamp()
+        )
+    )
+    assert any("native charge creation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["stripe_runs", "refund_recovery"])
+@pytest.mark.parametrize(
+    "when", [None, "1970-01-01T00:00:01+00:00", "2026-10-12T08:01:00+00:00"]
+)
+def test_refund_inventory_creation_cannot_disagree_with_selected_provider_refund(
+    bundle, group, when
+):
+    row = bundle[group] if group == "refund_recovery" else bundle[group][0]
+    refund = row["refund"]["inventory"]["data"][0]
+    if when is None:
+        refund.pop("created_at")
+    else:
+        refund["created_at"] = when
+    assert any("exactly one provider refund matching" in e for e in check(bundle))
+
+
+def test_bank_monitoring_covers_entire_fifth_day_for_latest_us_zone(bundle):
+    anchor = datetime(2026, 10, 12, 23, 59, tzinfo=UTC)
+    cutoff = checker.payout_observation_deadline(anchor)
+    assert cutoff == datetime(2026, 10, 20, 12, tzinfo=UTC)
+    row = bundle["stripe_runs"][0]
+    cutoff = checker.payout_observation_deadline(
+        max(
+            datetime.fromisoformat(row["bank_payout"]["arrival_at"]),
+            datetime.fromisoformat(row["bank_payout"]["recorded_at"]),
+        )
+    )
+    follow = row["bank_followup"]
+    follow["recorded_at"] = follow["events_through_at"] = (
+        cutoff - timedelta(microseconds=1)
+    ).isoformat()
+    assert any("five banking days" in e for e in check(bundle))
+    follow["recorded_at"] = follow["events_through_at"] = cutoff.isoformat()
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "incomplete",
+        "pagination",
+        "wrong_transfer",
+        "before_outcome",
+        "successful_reversal",
+        "after_completion",
+    ],
+)
+def test_platform_loss_requires_complete_post_outcome_empty_reversal_inventory(
+    bundle, mutation
+):
+    row = bundle["refund_recovery"]
+    outcome = row["refund"]["transfer_outcome"]
+    inventory = outcome["reversal_inventory"]
+    if mutation == "missing":
+        outcome.pop("reversal_inventory")
+    elif mutation == "incomplete":
+        inventory["complete"] = False
+    elif mutation == "pagination":
+        inventory["has_more"] = True
+    elif mutation == "wrong_transfer":
+        inventory["transfer_id"] = "tr_other"
+    elif mutation == "before_outcome":
+        inventory["recorded_at"] = row["started_at"]
+    elif mutation == "after_completion":
+        inventory["recorded_at"] = "2026-10-12T09:00:00+00:00"
+    else:
+        inventory["data"] = [
+            deepcopy(
+                bundle["stripe_runs"][0]["refund"]["transfer_outcome"][
+                    "provider_reversal"
+                ]
+            )
+        ]
+    assert any(
+        "reversal inventory" in e or "no successful provider reversal" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("which", ["receipt", "payment"])
+def test_receipt_tax_policy_is_the_same_frozen_quote_that_funded_capture(bundle, which):
+    paid, receipt = bundle["stripe_runs"][0]["payment"], bundle["receipt"]
+    if which == "receipt":
+        receipt["tax_version"] = receipt["owner_artifact"]["tax_version"] = receipt[
+            "frozen_tax_calculation"
+        ]["policy_version"] = "EXAMPLE-different-valid-policy"
+    else:
+        paid["tax_payable"]["policy_version"] = "EXAMPLE-different-valid-policy"
+    assert any("original frozen payable policy" in e for e in check(bundle))
