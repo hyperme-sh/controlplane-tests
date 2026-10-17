@@ -182,7 +182,7 @@ def record(name, hour=1, **fields):
                 },
             ],
         )
-    if name.startswith("stripe-"):
+    if name.startswith(("gateway-", "stripe-", "ok-")):
         scope = {
             key: result[key]
             for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
@@ -258,13 +258,14 @@ def record(name, hour=1, **fields):
             payment_intent_id=payment_id,
             charge_id=charge_id,
         )
+    if name.startswith("stripe-"):
         result["refund"] = record(
             "refund-" + name,
             hour,
-            recorded_at=(at - timedelta(seconds=5)).isoformat(),
+            recorded_at=(at - timedelta(seconds=47)).isoformat(),
             **scope,
             refund_id=refund_id,
-            created_at=(at - timedelta(seconds=8)).isoformat(),
+            created_at=(at - timedelta(seconds=50)).isoformat(),
             metadata={
                 "billing_record_id": scope["billing_record_id"],
                 "idempotency_key": "hm-refund-" + token,
@@ -278,7 +279,7 @@ def record(name, hour=1, **fields):
             transfer_outcome=record(
                 "refund-outcome-" + name,
                 hour,
-                recorded_at=(at - timedelta(seconds=4)).isoformat(),
+                recorded_at=(at - timedelta(seconds=46)).isoformat(),
                 **scope,
                 kind="reversed",
                 refund_id=refund_id,
@@ -295,7 +296,7 @@ def record(name, hour=1, **fields):
         result["refund"]["inventory"] = record(
             "inventory-" + name,
             hour,
-            recorded_at=(at - timedelta(seconds=3)).isoformat(),
+            recorded_at=(at - timedelta(seconds=45)).isoformat(),
             payment_intent_id=payment_id,
             complete=True,
             has_more=False,
@@ -322,12 +323,12 @@ def record(name, hour=1, **fields):
         }
         outcome = result["refund"]["transfer_outcome"]
         outcome["provider_reversal"]["created_at"] = (
-            at - timedelta(seconds=6)
+            at - timedelta(seconds=48)
         ).isoformat()
         outcome["reversal_inventory"] = record(
             "reversal-inventory-" + name,
             hour,
-            recorded_at=(at - timedelta(seconds=2)).isoformat(),
+            recorded_at=(at - timedelta(seconds=44)).isoformat(),
             transfer_id=result["connect_transfer"]["id"],
             complete=True,
             has_more=False,
@@ -382,7 +383,7 @@ def record(name, hour=1, **fields):
                 for operation in ("standard_payout", "instant_payout", "schedule_edit")
             ],
         )
-    if name.startswith("stripe-"):
+    if name.startswith(("gateway-", "stripe-", "ok-")):
         payment = result["payment"]
         payment["actor_sub"] = "sandbox-renter"
         payment["charge"].update(amount_refunded=0, refunded=False)
@@ -425,7 +426,7 @@ def record(name, hour=1, **fields):
             source="stripe_platform_account",
             schedule_interval="manual",
         )
-    if name.startswith("stripe-"):
+    if name.startswith(("gateway-", "stripe-", "ok-")):
         result["payment"]["intent"].update(object="payment_intent", amount=400)
         result["payment"]["charge"].update(
             object="charge",
@@ -438,13 +439,69 @@ def record(name, hour=1, **fields):
     if name.startswith(("gateway-", "stripe-", "ok-")):
         result["bank_payout"]["destination"] = result["bank_payout"]["bank_id"]
         result["payout_readiness"] = fresh_payout_readiness(result)
-    if name.startswith("stripe-"):
+    if name.startswith(("gateway-", "stripe-", "ok-")):
         payment = result["payment"]
         payment["intent"]["metadata"].update(
             lease_id=result["lease_id"], payment_flow="deposit"
         )
+        payment["intent"]["payment_method_options"] = {"crypto": {"mode": "deposit"}}
+        payment.update(
+            tax_revision_id=str(uuid5(NAMESPACE_URL, "tax" + name)),
+            tax_calculation_id="taxcalc_" + token,
+        )
+        payment["intent"]["metadata"].update(
+            {k: payment[k] for k in ("tax_revision_id", "tax_calculation_id")}
+        )
         payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    if name.startswith("stripe-"):
+        sync_bank_to_outcome(result)
     return result
+
+
+def sync_bank_to_outcome(row):
+    """Build an isolated provider ledger for the selected refund outcome."""
+    outcome = row["refund"]["transfer_outcome"]
+    reversed_host = outcome["kind"] == "reversed"
+    payable = (
+        row["settlement"]["post_refund_host_payable_cents"]
+        if reversed_host
+        else row["settlement"]["host_payable_cents"]
+    )
+    row["bank_payout"]["amount_cents"] = payable
+    transactions = row["bank_funding"]["transactions"]
+    transactions[:] = [tx for tx in transactions if tx["type"] != "payment_refund"]
+    transactions[1].update(amount=-payable, net=-payable)
+    if outcome["kind"] == "platform_loss":
+        # The bank has already drained the isolated balance when recovery fails.
+        at = datetime.fromisoformat(row["recorded_at"])
+        refund = row["refund"]
+        refund["created_at"] = (at - timedelta(seconds=8)).isoformat()
+        refund["recorded_at"] = (at - timedelta(seconds=5)).isoformat()
+        refund["inventory"]["recorded_at"] = (at - timedelta(seconds=3)).isoformat()
+        outcome["recorded_at"] = (at - timedelta(seconds=4)).isoformat()
+        outcome["provider_refusal"]["recorded_at"] = (
+            at - timedelta(seconds=5)
+        ).isoformat()
+    if reversed_host:
+        reversal = outcome["provider_reversal"]
+        reversal["destination_payment_refund"] = (
+            "pyr_connected" + row["connect_transfer"]["id"][3:]
+        )
+        outcome["reversal_inventory"]["data"][0] = deepcopy(reversal)
+        transactions.append(
+            {
+                "id": "txn_connected" + row["connect_transfer"]["id"][3:],
+                "source": reversal["destination_payment_refund"],
+                "type": "payment_refund",
+                "currency": "usd",
+                "status": "available",
+                "amount": -outcome["reversed_cents"],
+                "fee": 0,
+                "net": -outcome["reversed_cents"],
+                "created_at": reversal["created_at"],
+                "available_at": reversal["created_at"],
+            }
+        )
 
 
 def fresh_payout_readiness(row):
@@ -678,6 +735,11 @@ def refusal_record(name, hour, *, mismatch=False):
             counter_before=counter,
             counter_after=counter + 1,
         )
+    row["intent"].update(
+        object="payment_intent", payment_method_options={"crypto": {"mode": "deposit"}}
+    )
+    row["intent"]["metadata"].update(lease_id=scope["lease_id"], payment_flow="deposit")
+    row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
     return row
 
 
@@ -862,7 +924,7 @@ def bundle():
     recovery["reversal_refusal"] = record(
         "short-refusal",
         8,
-        recorded_at="2026-10-12T07:59:53+00:00",
+        recorded_at="2026-10-12T07:59:13+00:00",
         **scope,
         transfer_id=transfer["id"],
         refund_id=refund["refund_id"],
@@ -958,6 +1020,18 @@ def bundle():
         }
     )
     failure["bank_funding"] = funding
+    failure["payment"] = synthetic["payment"]
+    failure["settlement"] = synthetic["settlement"]
+    failure["source_charge_type"] = synthetic["source_charge_type"]
+    failure["payment"].update(failure_scope)
+    failure["payment"]["dispatch_checkpoint"].update(failure_scope)
+    failure["payment"]["intent"]["metadata"].update(
+        {k: failure[k] for k in ("tenant_id", "lease_id", "billing_record_id")}
+    )
+    failure["payment"]["capture_event"]["data"]["object"] = deepcopy(
+        failure["payment"]["intent"]
+    )
+    failure["settlement"].update(failure_scope)
     journey = result["stripe_runs"][0]
     receipt = result["receipt"]
     receipt.update(
@@ -975,6 +1049,44 @@ def bundle():
         livemode=False,
         recorded_at=journey["recorded_at"],
     )
+    receipt["throughput_map_version"] = "catalog-throughput/v1:" + "b" * 64
+    receipt["frozen_lease"] = record(
+        "receipt-frozen-lease",
+        5,
+        recorded_at="2026-10-12T04:55:30+00:00",
+        source="hypermesh_lease",
+        **{
+            k: receipt[k]
+            for k in (
+                "tenant_id",
+                "host_org_id",
+                "lease_id",
+                "billing_record_id",
+                "ruleset_version",
+                "throughput_map_version",
+            )
+        },
+    )
+    receipt["frozen_tax_calculation"] = record(
+        "receipt-frozen-tax",
+        5,
+        recorded_at="2026-10-12T04:55:40+00:00",
+        source="payment_tax_payable",
+        revision_id=journey["payment"]["tax_revision_id"],
+        calculation_id=journey["payment"]["tax_calculation_id"],
+        policy_version=receipt["tax_version"],
+        **{
+            k: receipt[k]
+            for k in (
+                "tenant_id",
+                "host_org_id",
+                "lease_id",
+                "billing_record_id",
+                "payment_intent_id",
+                "amount_cents",
+            )
+        },
+    )
     receipt["owner_artifact"] = record(
         "receipt-artifact",
         5,
@@ -983,7 +1095,16 @@ def bundle():
         **{
             k: v
             for k, v in receipt.items()
-            if k not in ("id", "url", "revision", "recorded_at", "passed")
+            if k
+            not in (
+                "id",
+                "url",
+                "revision",
+                "recorded_at",
+                "passed",
+                "frozen_lease",
+                "frozen_tax_calculation",
+            )
         },
     )
     result["fiat_rollout"]["platform_account_id"] = "acct_platform"
@@ -1602,6 +1723,12 @@ def test_incomplete_return_monitoring_rejects(bundle, key, value):
 
 def test_conditional_prerequisite_closure_is_required_separately(bundle):
     bundle["gateway_runs"][0]["source_charge_type"] = "non_stablecoin"
+    payment = bundle["gateway_runs"][0]["payment"]
+    payment["intent"]["metadata"].update(
+        payment_rail="stripe_checkout", payment_flow="checkout"
+    )
+    payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     bundle["fiat_rollout"]["prerequisites"].append(
         record(
             "source-change",
@@ -1733,6 +1860,7 @@ def test_platform_loss_after_short_balance_requires_completed_owner_record(bundl
         loss_record="billing-owner-loss-checkpoint",
     )
     outcome["provider_refusal"] = loss_provider_error(outcome)
+    sync_bank_to_outcome(bundle["stripe_runs"][0])
     assert check(bundle) == []
     outcome["operator_visible"] = False
     assert check(bundle)
@@ -1756,6 +1884,7 @@ def test_no_reversal_only_when_settlement_preserves_host_share(bundle):
     )
     assert check(bundle)
     row["settlement"].update(reversal_due_cents=0, post_refund_host_payable_cents=100)
+    sync_bank_to_outcome(row)
     assert check(bundle) == []
 
 
@@ -1885,6 +2014,7 @@ def test_platform_loss_cannot_also_claim_successful_reversal_identifiers(
         loss_record="owner-loss",
     )
     outcome["provider_refusal"] = loss_provider_error(outcome)
+    sync_bank_to_outcome(bundle["stripe_runs"][0])
     assert check(bundle) == []
     outcome[field] = value
     assert check(bundle)
@@ -2722,6 +2852,7 @@ def test_regular_stripe_loss_requires_provider_refusal(bundle, field, value):
         loss_record="owner-loss",
     )
     outcome["provider_refusal"] = loss_provider_error(outcome)
+    sync_bank_to_outcome(bundle["stripe_runs"][0])
     assert check(bundle) == []
     outcome["provider_refusal"][field] = value
     assert any(
@@ -2756,6 +2887,7 @@ def test_provider_error_request_cannot_be_reused_for_another_loss(bundle):
             loss_record="loss-" + row["id"],
         )
         outcome["provider_refusal"] = loss_provider_error(outcome)
+        sync_bank_to_outcome(row)
         outcomes.append(outcome)
     assert check(bundle) == []
     outcomes[1]["provider_refusal"]["request_id"] = outcomes[0]["provider_refusal"][
@@ -3038,3 +3170,176 @@ def test_provider_payout_destination_must_be_the_frozen_bank(bundle, failed):
     )
     payout["destination"] = "ba_changed"
     assert check(bundle)
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_source", "other_charge", "missing_payment", "wrong_scope", "uncaptured"],
+)
+def test_every_bank_funding_path_requires_authoritative_source_capture(
+    bundle, group, mutation
+):
+    row = bundle[group] if group == "failed_bank_payout" else bundle[group][0]
+    if mutation == "missing_source":
+        row["connect_transfer"].pop("source_transaction")
+        row["transfer_inventory"]["data"][0].pop("source_transaction")
+    elif mutation == "other_charge":
+        row["connect_transfer"]["source_transaction"] = "py_other"
+        row["transfer_inventory"]["data"][0]["source_transaction"] = "py_other"
+    elif mutation == "missing_payment":
+        row.pop("payment")
+    elif mutation == "wrong_scope":
+        row["payment"]["lease_id"] = "other"
+    else:
+        row["payment"]["charge"]["captured"] = False
+    assert any(
+        ("source_transaction" in e or "captured" in e or "payment" in e)
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "full_original_payout",
+        "missing_debit",
+        "wrong_debit",
+        "after_bank",
+        "other_source",
+    ],
+)
+def test_reversal_reduces_bank_entitlement_and_must_balance_before_dispatch(
+    bundle, mutation
+):
+    row = bundle["stripe_runs"][0]
+    txs = row["bank_funding"]["transactions"]
+    if mutation == "full_original_payout":
+        row["bank_payout"]["amount_cents"] = 100
+        txs[1].update(amount=-100, net=-100)
+    elif mutation == "missing_debit":
+        txs.pop()
+    elif mutation == "wrong_debit":
+        txs[-1].update(amount=-1, net=-1)
+    elif mutation == "after_bank":
+        txs[-1]["created_at"] = row["recorded_at"]
+    else:
+        txs[-1]["source"] = "pyr_other"
+    assert any(
+        "funding" in e or "reversal" in e or "bank payout" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "wrong_lease",
+        "wrong_flow",
+        "extra_meta",
+        "wrong_object",
+        "missing_mode",
+        "wrong_mode",
+        "on_behalf_of",
+        "transfer_data",
+        "application_fee_amount",
+    ],
+)
+def test_failed_deposit_cannot_use_an_intent_runtime_would_refuse(bundle, case):
+    row = bundle["failed_deposit"]
+    intent = row["intent"]
+    if case == "wrong_lease":
+        intent["metadata"]["lease_id"] = "other"
+    elif case == "wrong_flow":
+        intent["metadata"]["payment_flow"] = "checkout"
+    elif case == "extra_meta":
+        intent["metadata"]["extra"] = "unfrozen"
+    elif case == "wrong_object":
+        intent["object"] = "setup_intent"
+    elif case == "missing_mode":
+        intent.pop("payment_method_options")
+    elif case == "wrong_mode":
+        intent["payment_method_options"]["crypto"]["mode"] = "payment"
+    else:
+        intent[case] = 0 if case == "application_fee_amount" else "acct_other"
+    row["provider_event"]["data"]["object"] = deepcopy(intent)
+    assert any("frozen" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "revision,calculation",
+    [
+        ("bad", "taxcalc_valid"),
+        (None, "taxcalc_valid"),
+        ("88888888-8888-8888-8888-888888888888", None),
+        ("88888888-8888-8888-8888-888888888888", "bad"),
+    ],
+)
+def test_matching_tax_metadata_does_not_validate_an_invalid_order(
+    bundle, revision, calculation
+):
+    row = bundle["stripe_runs"][0]["payment"]
+    row.update(tax_revision_id=revision, tax_calculation_id=calculation)
+    row["intent"]["metadata"].update(
+        tax_revision_id=revision, tax_calculation_id=calculation
+    )
+    row["capture_event"]["data"]["object"] = deepcopy(row["intent"])
+    assert any("invalid frozen deposit tax binding" in e for e in check(bundle))
+
+
+def test_api_key_actor_cannot_establish_person_repeat_policy(bundle):
+    repeated = bundle["repeated_mismatch"]
+    repeated["actor_sub"] = repeated["policy_decision"]["actor_sub"] = (
+        "apikey:automation"
+    )
+    for row in repeated["attempts"]:
+        row["actor_sub"] = row["expected_payer"]["actor_sub"] = row[
+            "policy_observation"
+        ]["actor_sub"] = "apikey:automation"
+    assert any("actor/scope-bound mismatch counter" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("artifact", ["frozen_lease", "frozen_tax_calculation"])
+@pytest.mark.parametrize("mutation", ["missing", "scope", "source", "version", "late"])
+def test_receipt_versions_require_frozen_owner_provenance(bundle, artifact, mutation):
+    receipt = bundle["receipt"]
+    if mutation == "missing":
+        receipt.pop(artifact)
+    elif mutation == "scope":
+        receipt[artifact]["lease_id"] = "other"
+    elif mutation == "source":
+        receipt[artifact]["source"] = "current_configuration"
+    elif mutation == "late":
+        receipt[artifact]["recorded_at"] = receipt["recorded_at"]
+    else:
+        receipt[artifact][
+            "ruleset_version" if artifact == "frozen_lease" else "policy_version"
+        ] = "other"
+    assert any("receipt:" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field", ["tax_version", "ruleset_version", "throughput_map_version"]
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "unknown",
+        "unset-policy",
+        "legacy-placeholder",
+        "current",
+        "unstamped",
+        "unversioned",
+        "latest",
+        "n/a",
+    ],
+)
+def test_copied_placeholder_receipt_versions_are_not_provenance(bundle, field, value):
+    receipt = bundle["receipt"]
+    receipt[field] = receipt["owner_artifact"][field] = value
+    artifact = (
+        receipt["frozen_tax_calculation"]
+        if field == "tax_version"
+        else receipt["frozen_lease"]
+    )
+    artifact["policy_version" if field == "tax_version" else field] = value
+    assert any("placeholder/non-frozen version" in e for e in check(bundle))
