@@ -254,7 +254,7 @@ def record(name, hour=1, **fields):
             captured_cents=400,
             retained_cents=300,
             refund_due_cents=100,
-            refund_idempotency_key="hm-refund-" + token,
+            refund_idempotency_key=f"lease-settle-{result['billing_record_id']}-100",
             post_refund_host_payable_cents=80,
             post_refund_platform_compute_cents=220,
             tax_allocation={
@@ -279,7 +279,7 @@ def record(name, hour=1, **fields):
             created_at=(at - timedelta(seconds=50)).isoformat(),
             metadata={
                 "billing_record_id": scope["billing_record_id"],
-                "idempotency_key": "hm-refund-" + token,
+                "idempotency_key": f"lease-settle-{result['billing_record_id']}-100",
             },
             payment_intent_id=payment_id,
             charge_id=charge_id,
@@ -4586,6 +4586,10 @@ def taxable_settlement_fixture(row):
         refund_tax_cents=20,
     )
 
+    original_key = settlement["refund_idempotency_key"]
+    replace_tax_revision_everywhere(
+        row, original_key, f"lease-settle-{row['billing_record_id']}-80"
+    )
     bind_money_dispatch(row)
 
 
@@ -5298,3 +5302,133 @@ def test_normalized_owner_money_plans_preserve_integer_types(bundle, field, valu
     )
     row["refund"]["dispatch_plan"][field] = value
     assert any("immutable owner" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field", ["outer", "inner", "both"])
+@pytest.mark.parametrize("style", ["canonical", "hex", "uppercase", "urn", "braces"])
+def test_simulation_operation_ids_are_native_canonical_uuid_strings(
+    bundle, field, style
+):
+    binding = authorize_simulated_fixture(bundle["stripe_runs"][0])
+    outer = "abcdefab-5555-4555-8555-555555555555"
+    inner = "bcdefabc-6666-4666-8666-666666666666"
+
+    def spelling(value):
+        return {
+            "canonical": value,
+            "hex": value.replace("-", ""),
+            "uppercase": value.upper(),
+            "urn": "urn:uuid:" + value,
+            "braces": "{" + value + "}",
+        }[style]
+
+    binding["operation_id"] = spelling(outer) if field in ("outer", "both") else outer
+    binding["simulation"]["deposit_operation_id"] = binding["operation_id"]
+    binding["simulation"]["operation_id"] = (
+        spelling(inner) if field in ("inner", "both") else inner
+    )
+    if style == "canonical":
+        assert check(bundle) == []
+    else:
+        assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("kind", ["refund", "payment_refund"])
+@pytest.mark.parametrize("status", ["pending", "available"])
+def test_succeeded_mismatch_refund_can_return_processing_fees(bundle, kind, status):
+    final = bundle["repeated_mismatch"]["attempts"][0]["final_accounting"]
+    final["refund_balance_transaction"].update(
+        type=kind, status=status, fee=-3, net=-397
+    )
+    final["retained_fee_cost_cents"] = 7
+    assert check(bundle) == []
+    final["retained_fee_cost_cents"] = 10
+    assert any("inline retained fee" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("operator", [False, True])
+def test_returned_refund_fee_reconciles_with_standalone_charge_cost(bundle, operator):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    standalone_fees(row, operator=operator)
+    final = row["final_accounting"]
+    final["refund_balance_transaction"].update(fee=-3, net=-397)
+    final["retained_fee_cost_cents"] = 7
+    assert check(bundle) == []
+
+
+def non_stablecoin_gateway_fixture(bundle):
+    row = bundle["gateway_runs"][0]
+    row["source_charge_type"] = "non_stablecoin"
+    payment = row["payment"]
+    payment["intent"]["metadata"].update(
+        payment_rail="stripe_checkout", payment_flow="checkout"
+    )
+    payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    bundle["fiat_rollout"]["prerequisites"].append(
+        record(
+            "nonstable-source",
+            0,
+            recorded_at="2026-10-12T00:20:00+00:00",
+            repo="panopticon",
+            issue=491,
+            merged=True,
+            deployed=True,
+            merged_revision="b" * 40,
+            deployed_at="2026-10-12T00:15:00+00:00",
+        )
+    )
+    bundle["closed_issues"].append(491)
+    return row
+
+
+@pytest.mark.parametrize("subtotal,valid", [(399, False), (400, True), (1000, False)])
+def test_nonstablecoin_compute_cannot_exceed_or_understate_untaxed_capture(
+    bundle, subtotal, valid
+):
+    row = non_stablecoin_gateway_fixture(bundle)
+    payment = row["payment"]
+    payment["tax_payable"] = None
+    for field in ("tax_revision_id", "tax_calculation_id"):
+        payment.pop(field)
+        payment["intent"]["metadata"].pop(field)
+    payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    payment["subtotal_cents"] = subtotal
+    row["settlement"].update(
+        delivered_compute_cents=subtotal, platform_compute_cents=subtotal - 100
+    )
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("tax payable binding or breakdown" in e for e in check(bundle))
+
+
+def test_nonstablecoin_taxed_compute_reconciles_subtotal_tax_and_gross(bundle):
+    row = non_stablecoin_gateway_fixture(bundle)
+    row["payment"]["subtotal_cents"] = 320
+    row["payment"]["tax_payable"].update(subtotal_cents=320, tax_cents=80)
+    row["settlement"].update(delivered_compute_cents=320, platform_compute_cents=220)
+    assert check(bundle) == []
+    row["payment"]["tax_payable"]["tax_cents"] = 81
+    assert any("tax payable" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("kind", ["refund", "payment_refund"])
+def test_short_balance_recovery_accepts_both_native_refund_debit_types(bundle, kind):
+    bundle["refund_recovery"]["final_accounting"]["refund_balance_transaction"][
+        "type"
+    ] = kind
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize("taxed", [False, True])
+def test_ordinary_refund_cannot_replace_native_retry_key_even_when_copied_everywhere(
+    bundle, taxed
+):
+    row = bundle["stripe_runs"][1]
+    if taxed:
+        taxable_settlement_fixture(row)
+    assert check(bundle) == []
+    original = row["settlement"]["refund_idempotency_key"]
+    replace_tax_revision_everywhere(row, original, "hm-refund-manual")
+    assert any("native lease-settle" in e for e in check(bundle))
