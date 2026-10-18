@@ -109,6 +109,7 @@ def record(name, hour=1, **fields):
                 platform_fee_cents=0,
                 host_deduction_cents=0,
                 type="bank_account",
+                automatic=False,
                 status="paid",
                 livemode=False,
                 currency="usd",
@@ -268,6 +269,22 @@ def record(name, hour=1, **fields):
             reversal_due_cents=20,
             payment_intent_id=payment_id,
             charge_id=charge_id,
+        )
+    if name.startswith(("gateway-", "ok-")):
+        result["settlement"].update(
+            retained_cents=400,
+            refund_due_cents=0,
+            post_refund_host_payable_cents=100,
+            post_refund_platform_compute_cents=300,
+            reversal_due_cents=0,
+            tax_allocation={
+                "delivered_compute_cents": 400,
+                "retained_tax_cents": 0,
+                "refund_compute_cents": 0,
+                "refund_tax_cents": 0,
+                "refund_total_cents": 0,
+                "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+            },
         )
     if name.startswith("stripe-"):
         result["refund"] = record(
@@ -1377,6 +1394,7 @@ def bundle():
             "failed-bank",
             8,
             status="failed",
+            automatic=False,
             type="bank_account",
             started_at="2026-10-12T07:00:00+00:00",
             livemode=False,
@@ -1567,6 +1585,7 @@ def bundle():
     transfer.update(id=failure["transfer_id"], metadata=failure_scope)
     failure["connect_transfer"] = transfer
     failure["readiness"] = synthetic["readiness"]
+    failure["readiness"]["bank_id"] = failure["bank_id"]
     failure["transfer_inventory"] = synthetic["transfer_inventory"]
     failure["transfer_inventory"]["data"][0].update(
         id=transfer["id"], metadata=failure_scope
@@ -2170,6 +2189,10 @@ def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
     payment = bundle["stripe_runs"][0]["payment"]
     payment["intent"]["metadata"]["payment_rail"] = "stripe_checkout"
     payment["intent"]["metadata"]["payment_flow"] = "checkout"
+    payment["tax_payable"]["expires_at"] = (
+        int(datetime.fromisoformat(payment["checkout_created_at"]).timestamp())
+        + 31 * 60
+    )
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
     for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
         if candidate["payment"] is payment:
@@ -2359,6 +2382,10 @@ def test_conditional_prerequisite_closure_is_required_separately(bundle):
     payment = bundle["gateway_runs"][0]["payment"]
     payment["intent"]["metadata"].update(
         payment_rail="stripe_checkout", payment_flow="checkout"
+    )
+    payment["tax_payable"]["expires_at"] = (
+        int(datetime.fromisoformat(payment["checkout_created_at"]).timestamp())
+        + 31 * 60
     )
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
     for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
@@ -5565,6 +5592,10 @@ def non_stablecoin_gateway_fixture(bundle):
     row = bundle["gateway_runs"][0]
     row["source_charge_type"] = "non_stablecoin"
     payment = row["payment"]
+    payment["tax_payable"]["expires_at"] = (
+        int(datetime.fromisoformat(payment["checkout_created_at"]).timestamp())
+        + 31 * 60
+    )
     payment["intent"]["metadata"].update(
         payment_rail="stripe_checkout", payment_flow="checkout"
     )
@@ -6485,6 +6516,7 @@ def bank_read_only_recovery(row):
         payout={
             "id": payout["payout_id"],
             "object": "payout",
+            "automatic": False,
             "amount": payout["amount_cents"],
             "currency": "usd",
             "livemode": False,
@@ -6904,3 +6936,154 @@ def test_inventory_owner_must_match_the_enrolled_owners_authorization(bundle):
     for stage in ("enrollments_before", "enrollments_after"):
         bundle["fiat_rollout"][stage]["data"][0]["owner_sub"] = "unrelated-owner"
     assert any("subject-to-host ownership snapshot" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "remaining,valid", [(1, False), (1859, False), (1860, True), (1861, True)]
+)
+def test_checkout_quote_has_native_initial_lifetime(bundle, remaining, valid):
+    row = non_stablecoin_gateway_fixture(bundle)
+    payment = row["payment"]
+    payment["tax_payable"]["expires_at"] = (
+        int(datetime.fromisoformat(payment["checkout_created_at"]).timestamp())
+        + remaining
+    )
+    errors = check(bundle)
+    if valid:
+        assert errors == []
+    else:
+        assert any("31 minutes" in error for error in errors)
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("automatic", [True, None, 0])
+def test_bank_payout_requires_native_manual_origin(bundle, group, automatic):
+    row = financial_row(bundle, group)
+    row.get("bank_payout", row)["automatic"] = automatic
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("automatic", [True, None, 0])
+def test_read_only_payout_recovery_requires_manual_provider_object(bundle, automatic):
+    lookup = bank_read_only_recovery(bundle["gateway_runs"][0])
+    lookup["payout"]["automatic"] = automatic
+    assert any("reconciliation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_coherent_bank_change_cannot_redirect_frozen_transfer(bundle, group):
+    row = financial_row(bundle, group)
+    original_ready = deepcopy(row["readiness"])
+    replace_tax_revision_everywhere(row, original_ready["bank_id"], "ba_replacement")
+    row["readiness"] = original_ready
+    assert any("frozen owner/account/bank destination" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_verified_payer_snapshot_belongs_to_current_journey(
+    bundle, group, offset, valid
+):
+    row = financial_row(bundle, group)
+    row["payment"]["payer_snapshot"]["recorded_at"] = (
+        datetime.fromisoformat(row["started_at"]) + timedelta(seconds=offset)
+    ).isoformat()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("snapshot must follow journey start" in e for e in check(bundle))
+
+
+def test_failed_deposit_event_cannot_replace_native_zero_with_boolean(bundle):
+    row = bundle["failed_deposit"]
+    row["provider_event"]["data"]["object"]["amount_received"] = False
+    assert any(
+        "bound test-mode USD intent and provider event" in e for e in check(bundle)
+    )
+
+
+def test_gateway_cannot_omit_due_refund_and_pay_original_host_share(bundle):
+    row = bundle["gateway_runs"][0]
+    row["settlement"].update(
+        retained_cents=300,
+        refund_due_cents=100,
+        post_refund_host_payable_cents=80,
+        post_refund_platform_compute_cents=220,
+        reversal_due_cents=20,
+    )
+    row["settlement"]["tax_allocation"].update(
+        delivered_compute_cents=300, refund_compute_cents=100, refund_total_cents=100
+    )
+    assert any("requires a complete refund journey" in e for e in check(bundle))
+
+
+def preserve_host_share(row):
+    outcome = row["refund"]["transfer_outcome"]
+    outcome.pop("provider_reversal", None)
+    outcome.pop("reversal_inventory", None)
+    outcome.update(
+        kind="not_required",
+        reversal_id=None,
+        balance_transaction=None,
+        reversed_cents=0,
+        platform_loss_cents=0,
+        reversal_due_cents=0,
+    )
+    row["settlement"].update(
+        reversal_due_cents=0,
+        post_refund_host_payable_cents=100,
+        post_refund_platform_compute_cents=200,
+    )
+    sync_bank_to_outcome(row)
+
+
+@pytest.mark.parametrize("reversals", [0, 1])
+def test_acceptance_requires_actual_successful_reversal_not_only_balance_refusal(
+    bundle, reversals
+):
+    for row in bundle["stripe_runs"][reversals:]:
+        preserve_host_share(row)
+    if reversals:
+        assert check(bundle) == []
+    else:
+        assert check(bundle) == [
+            "requires at least one successful transfer reversal and residual bank payout in accepted journeys"
+        ]
+
+
+def test_taxed_mismatch_plan_cannot_replace_zero_allocation_with_boolean(bundle):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    # Zero-tax quotes are still native frozen tax allocations, with typed cents.
+    row["tax_payable"] = deepcopy(bundle["stripe_runs"][0]["payment"]["tax_payable"])
+    row["tax_payable"].update(
+        subtotal_cents=row["amount_cents"], total_cents=row["amount_cents"]
+    )
+    row.update(
+        tax_revision_id=row["tax_payable"]["revision_id"],
+        tax_calculation_id=row["tax_payable"]["calculation_id"],
+    )
+    row["intent"]["metadata"].update(
+        tax_revision_id=row["tax_payable"]["revision_id"],
+        tax_calculation_id=row["tax_payable"]["calculation_id"],
+    )
+    row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
+    plan = row["refund_plan"]["plan"]
+    plan.update(
+        stripe_tax_revision_id=row["tax_payable"]["revision_id"],
+        stripe_tax_calculation_id=row["tax_payable"]["calculation_id"],
+        stripe_captured_total_cents=row["amount_cents"],
+        stripe_refund_total_cents=row["amount_cents"],
+        stripe_tax_allocation={
+            "delivered_compute_cents": 0,
+            "retained_tax_cents": 0,
+            "refund_compute_cents": row["amount_cents"],
+            "refund_tax_cents": 0,
+            "refund_total_cents": row["amount_cents"],
+            "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+        },
+    )
+    bind_money_dispatch(row, mismatch=True)
+    assert check(bundle) == []
+    plan["stripe_tax_allocation"]["retained_tax_cents"] = False
+    bind_money_dispatch(row, mismatch=True)
+    assert any("frozen compute/tax refund allocation" in e for e in check(bundle))
