@@ -1020,6 +1020,7 @@ def bind_bank_dispatch(row, payout):
                 plan=frozen,
                 started_at=checkpoint["attempted_at"],
                 outcome="succeeded",
+                retention_guaranteed=True,
                 readiness=row["payout_readiness"],
                 provider_request=checkpoint["provider_request"],
             )
@@ -4640,6 +4641,9 @@ def test_simulation_must_precede_native_charge_creation_with_second_precision(
         authorized + timedelta(microseconds=999999)
     ).isoformat()
     row["payment"]["charge"]["created"] = int(authorized.timestamp()) + offset
+    row["connect_dispatch"]["source_recheck"]["charge"]["created"] = row["payment"][
+        "charge"
+    ]["created"]
     if offset < 0:
         assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
     else:
@@ -6199,6 +6203,37 @@ def shift_evidence_times(value, delta, suffix):
             shift_evidence_times(child, delta, suffix)
 
 
+def bind_bank_failure(attempt, *, provider=False):
+    req = attempt["provider_request"]
+    attempt["error_type"] = "InvalidRequestError" if provider else "TimeoutError"
+    failure = record(
+        "bank-failure-" + attempt["attempt_id"],
+        recorded_at=attempt["recorded_at"],
+        source="payment_bank_dispatch_failure",
+        attempt_id=attempt["attempt_id"],
+        plan=deepcopy(attempt["plan"]),
+        started_at=attempt["started_at"],
+        request_id=req.get("request_id"),
+        kind="provider_error" if provider else "transport_error",
+        error_type=attempt["error_type"],
+        response_received=provider,
+    )
+    if provider:
+        failure["code"] = "balance_insufficient"
+        failure["response"] = record(
+            "bank-provider-error-" + attempt["attempt_id"],
+            recorded_at=req["recorded_at"],
+            source="stripe_error_response",
+            request_id=req["request_id"],
+            account_id=req["account_id"],
+            livemode=False,
+            idempotency_key=req["idempotency_key"],
+            http_status=400,
+            error={"type": "invalid_request_error", "code": "balance_insufficient"},
+        )
+    attempt["failure"] = failure
+
+
 def bank_timeout_then_retry(row):
     inventory = row["bank_dispatch_attempts"]
     checkpoint = row["bank_dispatch_checkpoint"]
@@ -6216,6 +6251,7 @@ def bank_timeout_then_retry(row):
         request_id=None, payout_id=None, recorded_at=first["recorded_at"]
     )
     first["provider_request"]["id"] += "-initial-timeout"
+    bind_bank_failure(first)
     original.update(
         sequence=2,
         attempt_id=str(uuid5(NAMESPACE_URL, "bank-retry-" + row["id"])),
@@ -6379,6 +6415,7 @@ def bank_read_only_recovery(row):
     attempt["provider_request"] = deepcopy(checkpoint["provider_request"])
     attempt["provider_request"]["payout_id"] = None
     attempt.update(outcome="reconciled", error_type="TimeoutError")
+    bind_bank_failure(attempt)
     attempt["reconciliation"] = record(
         "payout-lookup-" + row["id"],
         recorded_at=(
@@ -6462,4 +6499,247 @@ def test_complete_bank_attempt_inventory_can_be_collected_after_initial_paid_obs
     row["bank_dispatch_attempts"]["recorded_at"] = (
         paid + timedelta(microseconds=1)
     ).isoformat()
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("object", "garbage"),
+        ("amount_captured", 1),
+        ("amount_captured", True),
+        ("created", 1),
+        ("created", True),
+        ("refunded", True),
+    ],
+)
+def test_connect_recheck_preserves_original_charge_snapshot(
+    bundle, group, field, value
+):
+    row = financial_row(bundle, group)
+    row["connect_dispatch"]["source_recheck"]["charge"][field] = value
+    assert any("source-charge recheck" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_dispatch_opt_in_is_part_of_this_journey(bundle, group, offset, valid):
+    row = financial_row(bundle, group)
+    start = datetime.fromisoformat(row["started_at"])
+    row["payment"]["dispatch_checkpoint"]["recorded_at"] = (
+        start + timedelta(microseconds=offset)
+    ).isoformat()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "payment dispatch opt-in must follow journey start" in e
+            for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize("field", ["id", "revision", "url", "passed", "all"])
+def test_every_transfer_requires_authenticated_readiness_evidence(bundle, group, field):
+    ready = financial_row(bundle, group)["readiness"]
+    for key in ("id", "revision", "url", "passed") if field == "all" else (field,):
+        ready.pop(key)
+    assert any(".readiness:" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_bank_provider_refusal_retains_actual_error_response_before_retry(
+    bundle, group
+):
+    first, _last = bank_timeout_then_retry(financial_row(bundle, group))
+    first["outcome"] = "provider_error"
+    first["provider_request"]["request_id"] = "req_initialrefusal" + group.replace(
+        "_", ""
+    )
+    bind_bank_failure(first, provider=True)
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "type",
+        "attempt",
+        "plan",
+        "start",
+        "request",
+        "response",
+        "received",
+        "time",
+        "provenance",
+    ],
+)
+def test_transport_outcome_requires_bound_exception_artifact(bundle, mutation):
+    first, _last = bank_timeout_then_retry(bundle["gateway_runs"][0])
+    failure = first["failure"]
+    if mutation == "missing":
+        first.pop("failure")
+    elif mutation == "type":
+        first["error_type"] = failure["error_type"] = "ValueError"
+    elif mutation == "attempt":
+        failure["attempt_id"] = "other"
+    elif mutation == "plan":
+        failure["plan"]["amount_cents"] += 1
+    elif mutation == "start":
+        failure["started_at"] = first["recorded_at"]
+    elif mutation == "request":
+        failure["request_id"] = "req_unrelated"
+    elif mutation == "response":
+        failure["response"] = {"payout_id": "po_success"}
+    elif mutation == "received":
+        failure["response_received"] = True
+    elif mutation == "time":
+        failure["recorded_at"] = "2026-10-12T00:00:01+00:00"
+    else:
+        failure["passed"] = False
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "response",
+        "request_id",
+        "code",
+        "missing_code",
+        "status",
+        "type",
+        "exception",
+        "account",
+        "key",
+        "provenance",
+        "time",
+    ],
+)
+def test_provider_error_outcome_requires_bound_response_and_request(bundle, mutation):
+    first, _last = bank_timeout_then_retry(bundle["gateway_runs"][0])
+    first["outcome"] = "provider_error"
+    first["provider_request"]["request_id"] = "req_initialrefusal"
+    bind_bank_failure(first, provider=True)
+    failure, response = first["failure"], first["failure"]["response"]
+    if mutation == "response":
+        failure.pop("response")
+    elif mutation == "request_id":
+        first["provider_request"]["request_id"] = failure["request_id"] = response[
+            "request_id"
+        ] = None
+    elif mutation == "code":
+        failure["code"] = "different"
+    elif mutation == "missing_code":
+        response["error"].pop("code")
+    elif mutation == "status":
+        response["http_status"] = 200
+    elif mutation == "type":
+        response["error"]["type"] = "payout"
+    elif mutation == "exception":
+        first["error_type"] = failure["error_type"] = "TimeoutError"
+    elif mutation == "account":
+        response["account_id"] = "acct_other"
+    elif mutation == "key":
+        response["idempotency_key"] = "other"
+    elif mutation == "provenance":
+        response["passed"] = False
+    else:
+        response["recorded_at"] = "2026-10-12T00:00:01+00:00"
+    assert check(bundle)
+
+
+def delay_bank_completion(row, delta):
+    checkpoint = row["bank_dispatch_checkpoint"]
+    inventory = row["bank_dispatch_attempts"]
+    payout = row["bank_payout"]
+    funding = row["bank_funding"]
+    for obj in (
+        row,
+        checkpoint,
+        inventory,
+        payout,
+        funding,
+        funding["closing_balance"],
+    ):
+        obj["recorded_at"] = (
+            datetime.fromisoformat(obj["recorded_at"]) + delta
+        ).isoformat()
+    inventory["window_end_at"] = checkpoint["recorded_at"]
+    funding["window_end_at"] = funding["closing_balance"]["recorded_at"]
+    followup = row["bank_followup"]
+    floor = checker.payout_observation_deadline(
+        max(
+            datetime.fromisoformat(payout["recorded_at"]),
+            datetime.fromisoformat(payout["arrival_at"]),
+        )
+    )
+    observed = max(
+        datetime.fromisoformat(followup["recorded_at"]), floor + timedelta(hours=1)
+    )
+    followup["recorded_at"] = followup["events_through_at"] = observed.isoformat()
+
+
+@pytest.mark.parametrize(
+    "age,valid",
+    [
+        (timedelta(hours=23) - timedelta(microseconds=1), True),
+        (timedelta(hours=23), False),
+        (timedelta(days=2), False),
+    ],
+)
+def test_bank_retries_use_original_safe_idempotency_window(bundle, age, valid):
+    row = bundle["gateway_runs"][-1]
+    first, last = bank_timeout_then_retry(row)
+    delta = age - (
+        datetime.fromisoformat(last["started_at"])
+        - datetime.fromisoformat(first["started_at"])
+    )
+    delay_bank_completion(row, delta)
+    bundle["test_credit_removed"]["recorded_at"] = "2026-10-26T11:00:00+00:00"
+    last["started_at"] = (
+        datetime.fromisoformat(last["started_at"]) + delta
+    ).isoformat()
+    last["recorded_at"] = (
+        datetime.fromisoformat(last["recorded_at"]) + delta
+    ).isoformat()
+    last["provider_request"]["recorded_at"] = (
+        datetime.fromisoformat(last["provider_request"]["recorded_at"]) + delta
+    ).isoformat()
+    shift_evidence_times(last["readiness"], delta, "-late-retry")
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("original 23-hour retry window" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("known", [False, None])
+def test_unknown_retention_cannot_authorize_even_a_fresh_bank_post(
+    bundle, index, known
+):
+    row = bundle["gateway_runs"][0]
+    bank_timeout_then_retry(row)
+    row["bank_dispatch_attempts"]["data"][index]["retention_guaranteed"] = known
+    assert any("known idempotency retention" in e for e in check(bundle))
+
+
+def test_read_only_payout_recovery_remains_available_after_retention_expires(bundle):
+    row = bundle["gateway_runs"][-1]
+    lookup = bank_read_only_recovery(row)
+    delta = timedelta(days=2)
+    delay_bank_completion(row, delta)
+    bundle["test_credit_removed"]["recorded_at"] = "2026-10-26T11:00:00+00:00"
+    lookup["recorded_at"] = (
+        datetime.fromisoformat(lookup["recorded_at"]) + delta
+    ).isoformat()
+    assert row["bank_dispatch_attempts"]["total_count"] == 1
     assert check(bundle) == []
