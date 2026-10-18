@@ -23,6 +23,31 @@ REVISION = "a" * 40
 COMMIT_TIME = datetime(2026, 10, 12, tzinfo=UTC)
 
 
+def bind_saved_deposit(row):
+    payment = row["payment"]
+    checkout = datetime.fromisoformat(payment["checkout_created_at"])
+    payment["deposit_binding"] = record(
+        "saved-deposit-" + row["id"],
+        recorded_at=(checkout - timedelta(seconds=5)).isoformat(),
+        source="payment_deposit_binding",
+        binding={
+            "version": 1,
+            "tenant_id": row["tenant_id"],
+            "billing_record_id": row["billing_record_id"],
+            "lease_id": row["lease_id"],
+            "wallet": payment["payer_snapshot"]["address"].lower(),
+            "actor_sub": payment["actor_sub"],
+            "intent_id": payment["payment_intent_id"],
+            "amount_cents": payment["amount_cents"],
+            "subtotal_cents": payment["subtotal_cents"],
+            "tax_payable": deepcopy(payment["tax_payable"]),
+            "operation_id": str(uuid5(NAMESPACE_URL, "deposit" + row["id"])),
+            "attempted_at": (checkout - timedelta(seconds=10)).isoformat(),
+            "return_url": "https://example.org/return",
+        },
+    )
+
+
 def record(name, hour=1, **fields):
     result = {
         "id": name,
@@ -496,6 +521,8 @@ def record(name, hour=1, **fields):
             },
         )
         payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
+    if name.startswith(("gateway-", "stripe-", "ok-")):
+        bind_saved_deposit(result)
     if name.startswith("stripe-"):
         sync_bank_to_outcome(result)
     if name.startswith(("gateway-", "stripe-", "ok-")):
@@ -949,6 +976,67 @@ def bind_source_type(row, payout, source_type="card"):
     bind_bank_dispatch(row, payout)
 
 
+def bind_platform_payout_inventory(row, payout):
+    observed = row.get("bank_followup", row.get("preservation", row))["recorded_at"]
+    start = row["payment"]["charge"]["created"]
+    filters = {
+        "created": {
+            "gte": start,
+            "lte": int(datetime.fromisoformat(observed).timestamp()),
+        }
+    }
+    provider = {
+        "id": payout["payout_id"],
+        "object": "payout",
+        "automatic": False,
+        "amount": payout["amount_cents"],
+        "currency": "usd",
+        "livemode": False,
+        "destination": payout["bank_id"],
+        "source_type": payout["source_type"],
+        "metadata": deepcopy(payout["metadata"]),
+        "status": payout["status"],
+        "created": int(datetime.fromisoformat(payout["created_at"]).timestamp()),
+    }
+    account_ids = [payout["account_id"], "acct_otherInventory"]
+    row["platform_payout_inventory"] = record(
+        "all-payouts-" + row["id"],
+        recorded_at=observed,
+        source="stripe_platform_payout_inventory",
+        platform_account_id="acct_platform",
+        livemode=False,
+        complete=True,
+        window_start_at=datetime.fromtimestamp(start, UTC).isoformat(),
+        window_end_at=observed,
+        accounts=record(
+            "all-accounts-" + row["id"],
+            recorded_at=observed,
+            source="stripe_account_inventory",
+            platform_account_id="acct_platform",
+            complete=True,
+            has_more=False,
+            filters={},
+            total_count=2,
+            data=[{"id": value, "object": "account"} for value in account_ids],
+        ),
+        contexts=[
+            record(
+                "payout-context-" + row["id"] + str(index),
+                recorded_at=observed,
+                source="stripe_payout_inventory",
+                account_id=account,
+                livemode=False,
+                complete=True,
+                has_more=False,
+                filters=deepcopy(filters),
+                total_count=1 if index == 0 else 0,
+                data=[provider] if index == 0 else [],
+            )
+            for index, account in enumerate(account_ids)
+        ],
+    )
+
+
 def bind_bank_dispatch(row, payout):
     token = row["id"]
     created = datetime.fromisoformat(payout["created_at"])
@@ -1044,6 +1132,8 @@ def bind_bank_dispatch(row, payout):
             )
         ],
     )
+
+    bind_platform_payout_inventory(row, payout)
 
 
 def fresh_payout_readiness(row):
@@ -1754,6 +1844,7 @@ def bundle():
         result["refund_recovery"],
         result["failed_bank_payout"],
     ]:
+        bind_saved_deposit(row)
         bind_connect_dispatch(row)
         if "bank_funding" in row:
             bind_source_type(row, row.get("bank_payout", row))
@@ -2216,7 +2307,7 @@ def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
     )
     assert check(bundle)
     bundle["closed_issues"].append(491)
-    assert check(bundle) == []
+    assert any("native lease adapter is not implemented" in e for e in check(bundle))
 
 
 def test_payout_cannot_be_reused_for_another_lease(bundle):
@@ -2409,7 +2500,7 @@ def test_conditional_prerequisite_closure_is_required_separately(bundle):
     )
     assert any("conditional #491" in error for error in check(bundle))
     bundle["closed_issues"].append(491)
-    assert check(bundle) == []
+    assert any("native lease adapter is not implemented" in e for e in check(bundle))
 
 
 @pytest.mark.parametrize("key", ["lease_id", "billing_record_id", "both"])
@@ -3283,6 +3374,7 @@ def test_buyer_wallet_normalization_is_case_insensitive(bundle):
     bundle["stripe_runs"][0]["connect_dispatch"]["source_recheck"]["charge"][
         "payment_method_details"
     ] = deepcopy(payment["charge"]["payment_method_details"])
+    bind_saved_deposit(bundle["stripe_runs"][0])
     assert check(bundle) == []
 
 
@@ -3748,6 +3840,7 @@ def authorize_simulated_fixture(row):
         "intent_id": payment["payment_intent_id"],
         "attempted_at": (at - timedelta(seconds=250)).isoformat(),
     }
+    payment["deposit_binding"]["binding"] = binding
     binding["simulation"] = {
         "version": 1,
         "tenant_id": row["tenant_id"],
@@ -4412,6 +4505,7 @@ def test_valid_checkout_quote_can_expire_before_capture_observation(bundle):
     paid["tax_payable"]["expires_at"] = int(
         (checkout + timedelta(seconds=1)).timestamp()
     )
+    bind_saved_deposit(bundle["stripe_runs"][0])
     assert check(bundle) == []
 
 
@@ -4714,6 +4808,7 @@ def test_simulation_must_precede_native_charge_creation_with_second_precision(
         row["payment"]["charge"]["created"], UTC
     ).isoformat()
     inventory["filters"]["created"]["gte"] = row["payment"]["charge"]["created"]
+    bind_platform_payout_inventory(row, row["bank_payout"])
     if offset < 0:
         assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
     else:
@@ -4818,6 +4913,7 @@ def taxable_settlement_fixture(row):
         refund_tax_cents=20,
     )
 
+    bind_saved_deposit(row)
     original_key = settlement["refund_idempotency_key"]
     replace_tax_revision_everywhere(
         row, original_key, f"lease-settle-{row['billing_record_id']}-80"
@@ -5644,7 +5740,9 @@ def test_nonstablecoin_compute_cannot_exceed_or_understate_untaxed_capture(
         delivered_compute_cents=subtotal, platform_compute_cents=subtotal - 100
     )
     if valid:
-        assert check(bundle) == []
+        assert any(
+            "native lease adapter is not implemented" in e for e in check(bundle)
+        )
     else:
         assert any("tax payable binding or breakdown" in e for e in check(bundle))
 
@@ -5669,7 +5767,7 @@ def test_nonstablecoin_taxed_compute_reconciles_subtotal_tax_and_gross(bundle):
             "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
         },
     )
-    assert check(bundle) == []
+    assert any("native lease adapter is not implemented" in e for e in check(bundle))
     row["payment"]["tax_payable"]["tax_cents"] = 81
     assert any("tax payable" in e for e in check(bundle))
 
@@ -5696,10 +5794,10 @@ def test_ordinary_refund_cannot_replace_native_retry_key_even_when_copied_everyw
 
 
 @pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
-def test_refund_plan_origin_is_bounded_by_original_checkout(bundle, offset, valid):
+def test_refund_plan_origin_is_bounded_by_owner_capture(bundle, offset, valid):
     row = bundle["stripe_runs"][0]
     plan = row["refund"]["dispatch_plan"]
-    at = datetime.fromisoformat(row["payment"]["checkout_created_at"]) + timedelta(
+    at = datetime.fromisoformat(row["payment"]["recorded_at"]) + timedelta(
         microseconds=offset
     )
     plan["attempted_at"] = plan["recorded_at"] = at.isoformat()
@@ -6798,6 +6896,7 @@ def delay_bank_completion(row, delta):
         datetime.fromisoformat(followup["recorded_at"]), floor + timedelta(hours=1)
     )
     followup["recorded_at"] = followup["events_through_at"] = observed.isoformat()
+    bind_platform_payout_inventory(row, payout)
 
 
 @pytest.mark.parametrize(
@@ -6977,7 +7076,7 @@ def test_checkout_quote_has_native_initial_lifetime(bundle, remaining, valid):
     )
     errors = check(bundle)
     if valid:
-        assert errors == []
+        assert any("native lease adapter is not implemented" in e for e in errors)
     else:
         assert any("31 minutes" in error for error in errors)
 
@@ -7388,3 +7487,227 @@ def test_provider_payout_creation_lineage_cannot_cross_financial_plans(
     else:
         other["request"]["id"] = original["request"]["id"]
     assert any("lineage reused across plans" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+@pytest.mark.parametrize(
+    "mutation", ["missing", "scope", "operation", "tax_float", "late", "url"]
+)
+def test_every_real_hash_capture_requires_its_native_saved_binding(
+    bundle, group, mutation
+):
+    row = financial_row(bundle, group)
+    artifact = row["payment"]["deposit_binding"]
+    binding = artifact["binding"]
+    if mutation == "missing":
+        row["payment"].pop("deposit_binding")
+    elif mutation == "scope":
+        binding["billing_record_id"] = "other"
+    elif mutation == "operation":
+        binding["operation_id"] = "manual"
+    elif mutation == "tax_float":
+        binding["tax_payable"]["tax_cents"] = 0.0
+    elif mutation == "late":
+        artifact["recorded_at"] = row["recorded_at"]
+    elif mutation == "url":
+        binding["return_url"] = "http://example.org/return"
+    assert any("saved deposit binding" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field,value", [("tax_cents", 0.0), ("version", True)])
+def test_simulation_cannot_authorize_a_changed_typed_saved_tax_snapshot(
+    bundle, field, value
+):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    binding["tax_payable"][field] = value
+    assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field", ["transfer_data", "on_behalf_of", "application_fee_amount"]
+)
+def test_checkout_cannot_claim_platform_charge_with_connect_fields(bundle, field):
+    row = non_stablecoin_gateway_fixture(bundle)
+    row["payment"]["intent"][field] = (
+        0
+        if field == "application_fee_amount"
+        else {"destination": "acct_other"}
+        if field == "transfer_data"
+        else "acct_other"
+    )
+    row["payment"]["capture_event"]["data"]["object"] = deepcopy(
+        row["payment"]["intent"]
+    )
+    assert any("platform charge binding" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field", ["payer_snapshot", "actor_sub"])
+def test_checkout_also_requires_authenticated_current_payer_snapshot(bundle, field):
+    row = non_stablecoin_gateway_fixture(bundle)
+    row["payment"].pop(field)
+    assert any("verified payer snapshot" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_source_recheck_amount_is_native_integer_cents(bundle, group):
+    financial_row(bundle, group)["connect_dispatch"]["source_recheck"][
+        "amount_cents"
+    ] = 100.0
+    assert any("Connect source-charge recheck" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_transfer_inventory_retains_native_boolean_mode(bundle, group):
+    financial_row(bundle, group)["transfer_inventory"]["data"][0]["livemode"] = 0
+    assert any("exactly one provider transfer" in e for e in check(bundle))
+
+
+def test_refund_plan_cannot_precede_its_authoritative_capture(bundle):
+    row = bundle["stripe_runs"][0]
+    plan = row["refund"]["dispatch_plan"]
+    before = (
+        datetime.fromisoformat(row["payment"]["capture_event"]["created_at"])
+        - timedelta(seconds=1)
+    ).isoformat()
+    plan["attempted_at"] = plan["recorded_at"] = before
+    row["refund"]["dispatch_checkpoint"]["attempted_at"] = before
+    assert any("original checkout/payment chronology" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("other", ["refund", "reversal", "bank", "lookup"])
+def test_stripe_request_ids_use_one_namespace_across_http_endpoints(bundle, other):
+    row = bundle["stripe_runs"][0]
+    identity = row["connect_dispatch"]["provider_request"]["request_id"]
+    if other == "refund":
+        request = row["refund"]["dispatch_checkpoint"]["provider_request"]
+    elif other == "reversal":
+        request = row["refund"]["transfer_outcome"]["owner_reversal"][
+            "dispatch_checkpoint"
+        ]["provider_request"]
+    elif other == "bank":
+        request = row["bank_dispatch_checkpoint"]["provider_request"]
+    else:
+        request = bank_read_only_recovery(row)
+    request["request_id"] = identity
+    assert any(
+        "provider request ID reused across different HTTP operations" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("group", ["refund_recovery", "failed_bank_payout"])
+def test_nonstablecoin_special_exercises_require_491_closure_even_while_adapter_is_blocked(
+    bundle, group
+):
+    row = bundle[group]
+    row["source_charge_type"] = "non_stablecoin"
+    assert any("conditional #491" in e for e in check(bundle))
+    bundle["closed_issues"].append(491)
+    assert not any("conditional #491" in e for e in check(bundle))
+    assert any("native lease adapter is not implemented" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["lease_id", "billing_record_id", "payment_intent_id", "charge_id", "event_id"],
+)
+def test_failed_bank_cannot_reuse_any_refusal_financial_identity(bundle, field):
+    failed = bundle["failed_bank_payout"]
+    refusal = bundle["repeated_mismatch"]["attempts"][0]
+    if field in ("lease_id", "billing_record_id"):
+        failed[field] = refusal[field]
+    elif field == "event_id":
+        failed["payment"]["capture_event"]["id"] = refusal["provider_event"]["id"]
+    else:
+        failed["payment"][field] = refusal["intent"][
+            "id" if field == "payment_intent_id" else "latest_charge"
+        ]
+    assert any("must be distinct from refusal attempts" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "tie",
+    [
+        "plan_id",
+        "operation_id",
+        "charge_id",
+        "transfer_id",
+        "lease_id",
+        "billing_record_id",
+    ],
+)
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_platform_inventory_detects_related_payout_on_different_connected_account(
+    bundle, group, tie
+):
+    row = financial_row(bundle, group)
+    contexts = row["platform_payout_inventory"]["contexts"]
+    duplicate = deepcopy(contexts[0]["data"][0])
+    duplicate.update(
+        id="po_otherAccount",
+        destination="ba_other",
+        metadata={tie: duplicate["metadata"][tie]},
+    )
+    contexts[1]["data"] = [duplicate]
+    contexts[1]["total_count"] = 1
+    assert any(
+        "exactly one provider payout across all connected accounts" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "missing_context",
+        "incomplete_accounts",
+        "incomplete_context",
+        "narrow_window",
+        "stale",
+        "float_count",
+    ],
+)
+def test_platform_inventory_requires_all_accounts_pages_and_full_window(
+    bundle, mutation
+):
+    row = bundle["gateway_runs"][0]
+    inventory = row["platform_payout_inventory"]
+    if mutation == "missing":
+        row.pop("platform_payout_inventory")
+    elif mutation == "missing_context":
+        inventory["contexts"].pop()
+    elif mutation == "incomplete_accounts":
+        inventory["accounts"]["has_more"] = True
+    elif mutation == "incomplete_context":
+        inventory["contexts"][0]["has_more"] = True
+    elif mutation == "narrow_window":
+        inventory["contexts"][0]["filters"]["created"]["gte"] += 1
+    elif mutation == "stale":
+        inventory["window_end_at"] = row["recorded_at"]
+    elif mutation == "float_count":
+        inventory["contexts"][0]["total_count"] = 1.0
+    assert any(
+        "payout inventory" in e
+        or "connected-account inventory" in e
+        or "native payout pages" in e
+        for e in check(bundle)
+    )
+
+
+def test_platform_inventory_allows_unrelated_payout_in_another_account(bundle):
+    contexts = bundle["gateway_runs"][0]["platform_payout_inventory"]["contexts"]
+    unrelated = deepcopy(contexts[0]["data"][0])
+    unrelated.update(id="po_unrelatedOtherAccount", destination="ba_other", metadata={})
+    contexts[1]["data"] = [unrelated]
+    contexts[1]["total_count"] = 1
+    assert check(bundle) == []
