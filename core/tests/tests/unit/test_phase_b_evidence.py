@@ -1450,6 +1450,7 @@ def bundle():
                     "tenant_id": "11111111-1111-1111-1111-111111111111",
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
                     "attempt_id": "original",
+                    "owner_sub": "sandbox-host-owner",
                     "stripe_account_id": "acct_host",
                     "payout_method": "fiat_bank",
                     "eligibility_rule_version": "fiat-us/v1",
@@ -1460,6 +1461,7 @@ def bundle():
                     "tenant_id": "11111111-1111-1111-1111-111111111111",
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
                     "attempt_id": "original",
+                    "owner_sub": "sandbox-host-owner",
                     "stripe_account_id": "acct_host",
                     "payout_method": "fiat_bank",
                     "eligibility_rule_version": "fiat-us/v1",
@@ -1598,6 +1600,21 @@ def bundle():
     failure["bank_funding"] = funding
     failure["payment"] = synthetic["payment"]
     failure["settlement"] = synthetic["settlement"]
+    failure["settlement"].update(
+        retained_cents=400,
+        refund_due_cents=0,
+        post_refund_host_payable_cents=100,
+        post_refund_platform_compute_cents=300,
+        reversal_due_cents=0,
+        tax_allocation={
+            "delivered_compute_cents": 400,
+            "retained_tax_cents": 0,
+            "refund_compute_cents": 0,
+            "refund_tax_cents": 0,
+            "refund_total_cents": 0,
+            "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+        },
+    )
     failure["source_charge_type"] = synthetic["source_charge_type"]
     failure["payment"].update(failure_scope)
     failure["payment"]["dispatch_checkpoint"].update(failure_scope)
@@ -2768,8 +2785,13 @@ def test_cloning_successful_stripe_journey_does_not_count_as_three_runs(bundle):
         row["recorded_at"] = f"2026-10-12T0{5 + i}:00:00+00:00"
     bundle["stripe_runs"] = copies
     errors = check(bundle)
-    assert any("distinct lease_id within stripe_runs" in e for e in errors)
-    assert any("distinct billing_record_id within stripe_runs" in e for e in errors)
+    assert any(
+        "distinct lease_id across gateway and Stripe journeys" in e for e in errors
+    )
+    assert any(
+        "distinct billing_record_id across gateway and Stripe journeys" in e
+        for e in errors
+    )
 
 
 @pytest.mark.parametrize(
@@ -4259,6 +4281,7 @@ def add_historical_usdc_enrollment(bundle):
         "tenant_id": "11111111-1111-1111-1111-111111111111",
         "host_org_id": "99999999-9999-9999-9999-999999999999",
         "attempt_id": "historical-usdc",
+        "owner_sub": "historical-host-owner",
         "stripe_account_id": "acct_historicalusdc",
         "payout_method": "usdc",
         "eligibility_rule_version": "usdc-stablecoin/v1",
@@ -4560,6 +4583,21 @@ def test_fully_reconciled_gateway_cannot_transfer_more_than_original_capture(
         "amount_cents"
     ] = row["bank_payout"]["amount_cents"] = amount
     row["settlement"]["platform_compute_cents"] = 400 - amount
+    row["settlement"].update(
+        retained_cents=400,
+        refund_due_cents=0,
+        post_refund_host_payable_cents=amount,
+        post_refund_platform_compute_cents=400 - amount,
+        reversal_due_cents=0,
+        tax_allocation={
+            "delivered_compute_cents": 400,
+            "retained_tax_cents": 0,
+            "refund_compute_cents": 0,
+            "refund_tax_cents": 0,
+            "refund_total_cents": 0,
+            "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+        },
+    )
     row["transfer_inventory"]["data"][0]["amount"] = amount
     row["bank_funding"]["transactions"][0].update(amount=amount, net=amount)
     row["bank_funding"]["transactions"][1].update(amount=-amount, net=-amount)
@@ -5580,6 +5618,21 @@ def test_nonstablecoin_taxed_compute_reconciles_subtotal_tax_and_gross(bundle):
     row["payment"]["subtotal_cents"] = 320
     row["payment"]["tax_payable"].update(subtotal_cents=320, tax_cents=80)
     row["settlement"].update(delivered_compute_cents=320, platform_compute_cents=220)
+    row["settlement"].update(
+        retained_cents=400,
+        refund_due_cents=0,
+        post_refund_host_payable_cents=100,
+        post_refund_platform_compute_cents=220,
+        reversal_due_cents=0,
+        tax_allocation={
+            "delivered_compute_cents": 320,
+            "retained_tax_cents": 80,
+            "refund_compute_cents": 0,
+            "refund_tax_cents": 0,
+            "refund_total_cents": 0,
+            "allocation_policy": "EXAMPLE-compute-proportional-tax-v1",
+        },
+    )
     assert check(bundle) == []
     row["payment"]["tax_payable"]["tax_cents"] = 81
     assert any("tax payable" in e for e in check(bundle))
@@ -6743,3 +6796,111 @@ def test_read_only_payout_recovery_remains_available_after_retention_expires(bun
     ).isoformat()
     assert row["bank_dispatch_attempts"]["total_count"] == 1
     assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "url,valid",
+    [
+        ("https://\ud800.example/", False),
+        ("https://\u200d.example/", False),
+        ("https://b\u00fccher.example/", True),
+        ("https://[::1]/return", True),
+    ],
+)
+def test_simulated_url_hostname_matches_runtime_parser(bundle, url, valid):
+    row = bundle["stripe_runs"][0]
+    binding = authorize_simulated_fixture(row)
+    binding["return_url"] = url
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("simulation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("retained_cents", 12645),
+        ("refund_due_cents", 12445),
+        ("captured_cents", 12645),
+        ("post_refund_host_payable_cents", 101),
+        ("post_refund_platform_compute_cents", 301),
+        ("reversal_due_cents", 1),
+    ],
+)
+@pytest.mark.parametrize("group", ["gateway_runs", "failed_bank_payout"])
+def test_failed_bank_must_reconcile_full_native_settlement(bundle, group, field, value):
+    financial_row(bundle, group)["settlement"][field] = value
+    assert any(
+        "allocation" in e
+        or "settlement must reconcile" in e
+        or "isolated bank rejection" in e
+        for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "delivered_compute_cents",
+        "retained_tax_cents",
+        "refund_compute_cents",
+        "refund_tax_cents",
+        "refund_total_cents",
+    ],
+)
+@pytest.mark.parametrize("group", ["gateway_runs", "failed_bank_payout"])
+def test_failed_bank_cannot_hide_inconsistent_tax_or_refund_allocation(
+    bundle, group, field
+):
+    financial_row(bundle, group)["settlement"]["tax_allocation"][field] += 1
+    assert any("compute-only allocation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "fields", [("lease_id",), ("billing_record_id",), ("lease_id", "billing_record_id")]
+)
+def test_gateway_and_stripe_cannot_count_the_same_billing_journey_twice(bundle, fields):
+    gateway, stripe = bundle["gateway_runs"][-1], bundle["stripe_runs"][-1]
+    changes = {stripe[field]: gateway[field] for field in fields}
+
+    def replace(value):
+        if isinstance(value, str):
+            for old, new in changes.items():
+                value = value.replace(old, new)
+            return value
+        if isinstance(value, dict):
+            return {k: replace(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [replace(v) for v in value]
+        return value
+
+    bundle["stripe_runs"][-1] = replace(stripe)
+    errors = check(bundle)
+    assert len(errors) == len(fields)
+    assert all("across gateway and Stripe journeys" in e for e in errors)
+
+
+@pytest.mark.parametrize("stage", ["enrollments_before", "enrollments_after"])
+@pytest.mark.parametrize(
+    "owner", [None, "", " padded-owner ", "owner name", "owner\x00subject"]
+)
+def test_every_historical_enrollment_requires_canonical_owner(bundle, stage, owner):
+    add_historical_usdc_enrollment(bundle)
+    bundle["fiat_rollout"][stage]["data"][-1]["owner_sub"] = owner
+    assert any("canonical owner_sub" in e for e in check(bundle))
+
+
+def test_rollout_preserves_owners_beyond_the_selected_host(bundle):
+    add_historical_usdc_enrollment(bundle)
+    assert check(bundle) == []
+    bundle["fiat_rollout"]["enrollments_after"]["data"][-1]["owner_sub"] = (
+        "replacement-owner"
+    )
+    assert any("history was lost or replaced" in e for e in check(bundle))
+
+
+def test_inventory_owner_must_match_the_enrolled_owners_authorization(bundle):
+    for stage in ("enrollments_before", "enrollments_after"):
+        bundle["fiat_rollout"][stage]["data"][0]["owner_sub"] = "unrelated-owner"
+    assert any("subject-to-host ownership snapshot" in e for e in check(bundle))
