@@ -996,6 +996,36 @@ def bind_bank_dispatch(row, payout):
         ),
     )
 
+    attempt_id = str(uuid5(NAMESPACE_URL, "bank-attempt-" + token))
+    checkpoint = row["bank_dispatch_checkpoint"]
+    checkpoint.update(attempt_count=1, provider_attempt_id=attempt_id)
+    row["bank_dispatch_attempts"] = record(
+        "bank-attempts-" + token,
+        recorded_at=checkpoint["recorded_at"],
+        source="payment_bank_dispatch_attempt_inventory",
+        complete=True,
+        has_more=False,
+        filters={},
+        total_count=1,
+        plan=frozen,
+        window_start_at=row["bank_dispatch_plan"]["recorded_at"],
+        window_end_at=checkpoint["recorded_at"],
+        data=[
+            record(
+                "bank-attempt-" + token,
+                recorded_at=checkpoint["provider_request"]["recorded_at"],
+                source="payment_bank_dispatch_attempt",
+                attempt_id=attempt_id,
+                sequence=1,
+                plan=frozen,
+                started_at=checkpoint["attempted_at"],
+                outcome="succeeded",
+                readiness=row["payout_readiness"],
+                provider_request=checkpoint["provider_request"],
+            )
+        ],
+    )
+
 
 def fresh_payout_readiness(row):
     ready = deepcopy(row["readiness"])
@@ -3778,6 +3808,10 @@ def test_waiting_for_funds_requires_another_bank_read_before_payout(bundle):
         datetime.fromisoformat(row["payout_readiness"]["recorded_at"])
         + timedelta(minutes=6)
     ).isoformat()
+    row["bank_dispatch_checkpoint"]["attempted_at"] = row["bank_payout"]["created_at"]
+    row["bank_dispatch_attempts"]["data"][0]["started_at"] = row["bank_payout"][
+        "created_at"
+    ]
     assert any("fresh bank readiness required" in e for e in check(bundle))
 
 
@@ -5768,6 +5802,8 @@ def test_bank_inventory_cannot_close_before_terminal_dispatch(
         terminal = datetime.fromisoformat(funding["closing_balance"]["recorded_at"])
         row["bank_dispatch_checkpoint"]["recorded_at"] = terminal.isoformat()
         row["bank_dispatch"]["recorded_at"] = terminal.isoformat()
+        row["bank_dispatch_attempts"]["window_end_at"] = terminal.isoformat()
+        row["bank_dispatch_attempts"]["recorded_at"] = terminal.isoformat()
     closing = (terminal + timedelta(microseconds=offset)).isoformat()
     funding["closing_balance"]["recorded_at"] = funding["window_end_at"] = closing
     if valid:
@@ -5825,6 +5861,9 @@ def test_bank_plan_follows_source_transfer_and_payout_readiness(
     row["bank_dispatch_plan"]["recorded_at"] = (
         ready + timedelta(microseconds=offset)
     ).isoformat()
+    row["bank_dispatch_attempts"]["window_start_at"] = row["bank_dispatch_plan"][
+        "recorded_at"
+    ]
     if valid:
         assert check(bundle) == []
     else:
@@ -6144,3 +6183,283 @@ def test_mismatch_approval_follows_its_persisted_policy(
         assert any(
             "mismatch policy must persist before approval" in e for e in check(bundle)
         )
+
+
+def shift_evidence_times(value, delta, suffix):
+    if isinstance(value, dict):
+        if "revision" in value and "recorded_at" in value:
+            value["recorded_at"] = (
+                datetime.fromisoformat(value["recorded_at"]) + delta
+            ).isoformat()
+            value["id"] += suffix
+        for child in value.values():
+            shift_evidence_times(child, delta, suffix)
+    elif isinstance(value, list):
+        for child in value:
+            shift_evidence_times(child, delta, suffix)
+
+
+def bank_timeout_then_retry(row):
+    inventory = row["bank_dispatch_attempts"]
+    checkpoint = row["bank_dispatch_checkpoint"]
+    original = inventory["data"][0]
+    created = datetime.fromisoformat(
+        checkpoint["provider_request"]["recorded_at"]
+    ) - timedelta(seconds=1)
+    first = deepcopy(original)
+    first.update(
+        outcome="transport_error",
+        error_type="TimeoutError",
+        recorded_at=(created - timedelta(seconds=1)).isoformat(),
+    )
+    first["provider_request"].update(
+        request_id=None, payout_id=None, recorded_at=first["recorded_at"]
+    )
+    first["provider_request"]["id"] += "-initial-timeout"
+    original.update(
+        sequence=2,
+        attempt_id=str(uuid5(NAMESPACE_URL, "bank-retry-" + row["id"])),
+        started_at=(created + timedelta(microseconds=250000)).isoformat(),
+        id=original["id"] + "-retry",
+    )
+    ready = deepcopy(row["payout_readiness"])
+    shift_evidence_times(
+        ready,
+        created
+        + timedelta(microseconds=100000)
+        - datetime.fromisoformat(ready["recorded_at"]),
+        "-retry",
+    )
+    original["readiness"] = ready
+    inventory["data"] = [first, original]
+    inventory["total_count"] = checkpoint["attempt_count"] = 2
+    checkpoint["provider_attempt_id"] = original["attempt_id"]
+    return first, original
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_bank_timeout_retry_preserves_every_post_and_its_fresh_readiness(bundle, group):
+    bank_timeout_then_retry(financial_row(bundle, group))
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "omit_first",
+        "wrong_first_key",
+        "wrong_first_amount",
+        "stale_retry_read",
+        "missing_retry_read",
+        "reorder",
+        "duplicate_attempt",
+        "count",
+        "incomplete",
+        "filtered",
+        "different_plan",
+        "provider_request_reuse",
+        "terminal_attempt",
+    ],
+)
+def test_complete_bank_attempt_journal_cannot_hide_earlier_mutations(bundle, mutation):
+    row = bundle["gateway_runs"][0]
+    first, last = bank_timeout_then_retry(row)
+    inventory = row["bank_dispatch_attempts"]
+    if mutation == "omit_first":
+        inventory["data"].pop(0)
+    elif mutation == "wrong_first_key":
+        first["provider_request"]["idempotency_key"] = "manual-first-key"
+    elif mutation == "wrong_first_amount":
+        first["provider_request"]["parameters"]["amount"] += 1
+    elif mutation == "stale_retry_read":
+        shift_evidence_times(last["readiness"], -timedelta(minutes=6), "-stale")
+    elif mutation == "missing_retry_read":
+        last.pop("readiness")
+    elif mutation == "reorder":
+        inventory["data"].reverse()
+    elif mutation == "duplicate_attempt":
+        last["attempt_id"] = first["attempt_id"]
+    elif mutation == "count":
+        row["bank_dispatch_checkpoint"]["attempt_count"] = 1
+    elif mutation == "incomplete":
+        inventory["complete"] = False
+    elif mutation == "filtered":
+        inventory["filters"] = {"outcome": "succeeded"}
+    elif mutation == "different_plan":
+        first["plan"]["bank_id"] = "ba_other"
+    elif mutation == "provider_request_reuse":
+        first["provider_request"]["request_id"] = last["provider_request"]["request_id"]
+    else:
+        row["bank_dispatch_checkpoint"]["provider_attempt_id"] = first["attempt_id"]
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("field", ["plan_id", "operation_id"])
+@pytest.mark.parametrize("form", ["hex", "upper", "braces", "urn", "canonical"])
+def test_bank_uuid_alias_cannot_bypass_changed_authority_reuse(bundle, field, form):
+    from uuid import UUID
+
+    first, row = bundle["gateway_runs"][:2]
+    original = first["bank_dispatch_plan"][field]
+    value = {
+        "hex": UUID(original).hex,
+        "upper": original.upper(),
+        "braces": "{" + original + "}",
+        "urn": UUID(original).urn,
+        "canonical": original,
+    }[form]
+    row["bank_dispatch_plan"][field] = row["bank_dispatch_checkpoint"][field] = value
+    row["bank_payout"]["metadata"][field] = value
+    row["bank_dispatch_checkpoint"]["provider_request"]["parameters"]["metadata"][
+        field
+    ] = value
+    row["bank_dispatch_attempts"]["plan"][field] = value
+    for attempt in row["bank_dispatch_attempts"]["data"]:
+        attempt["plan"][field] = value
+    errors = check(bundle)
+    assert any(
+        "bank plan/operation/key reused" in e
+        if form == "canonical"
+        else "persisted scope-bound bank plan" in e
+        for e in errors
+    )
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "same_second",
+        "provider_before_attempt_second",
+        "read_after_attempt",
+        "request_before_attempt",
+    ],
+)
+def test_bank_native_creation_precision_preserves_precise_owner_order(
+    bundle, group, case
+):
+    row = financial_row(bundle, group)
+    payout = row if group == "failed_bank_payout" else row["bank_payout"]
+    native = datetime.fromisoformat(payout["created_at"])
+    ready = row["payout_readiness"]
+    delta = (
+        native
+        + timedelta(microseconds=500000)
+        - datetime.fromisoformat(ready["recorded_at"])
+    )
+    shift_evidence_times(ready, delta, "-fractional")
+    row["bank_dispatch_plan"]["recorded_at"] = (
+        native + timedelta(microseconds=600000)
+    ).isoformat()
+    checkpoint = row["bank_dispatch_checkpoint"]
+    checkpoint["attempted_at"] = (native + timedelta(microseconds=700000)).isoformat()
+    inventory = row["bank_dispatch_attempts"]
+    inventory["window_start_at"] = row["bank_dispatch_plan"]["recorded_at"]
+    inventory["data"][0]["started_at"] = checkpoint["attempted_at"]
+    if case == "provider_before_attempt_second":
+        payout["created_at"] = (native - timedelta(seconds=1)).isoformat()
+    elif case == "read_after_attempt":
+        ready["recorded_at"] = (native + timedelta(microseconds=800000)).isoformat()
+    elif case == "request_before_attempt":
+        checkpoint["provider_request"]["recorded_at"] = (
+            native + timedelta(microseconds=650000)
+        ).isoformat()
+    if case == "same_second":
+        assert check(bundle) == []
+    else:
+        assert check(bundle)
+
+
+def bank_read_only_recovery(row):
+    payout = row.get("bank_payout", row)
+    checkpoint = row["bank_dispatch_checkpoint"]
+    inventory = row["bank_dispatch_attempts"]
+    attempt = inventory["data"][0]
+    checkpoint["provider_request"]["request_id"] = None
+    attempt["provider_request"] = deepcopy(checkpoint["provider_request"])
+    attempt["provider_request"]["payout_id"] = None
+    attempt.update(outcome="reconciled", error_type="TimeoutError")
+    attempt["reconciliation"] = record(
+        "payout-lookup-" + row["id"],
+        recorded_at=(
+            datetime.fromisoformat(attempt["recorded_at"])
+            + timedelta(microseconds=500000)
+        ).isoformat(),
+        source="stripe_request",
+        request_id="req_lookup" + row["id"].replace("-", ""),
+        method="GET",
+        path=f"/v1/payouts/{payout['payout_id']}",
+        account_id=payout["account_id"],
+        livemode=False,
+        payout_id=payout["payout_id"],
+        payout={
+            "id": payout["payout_id"],
+            "object": "payout",
+            "amount": payout["amount_cents"],
+            "currency": "usd",
+            "livemode": False,
+            "destination": payout["bank_id"],
+            "source_type": payout["source_type"],
+            "metadata": deepcopy(payout["metadata"]),
+        },
+    )
+    return attempt["reconciliation"]
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_bank_lost_response_can_reconcile_without_another_post(bundle, group):
+    row = financial_row(bundle, group)
+    bank_read_only_recovery(row)
+    assert row["bank_dispatch_attempts"]["total_count"] == 1
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("method", "POST"),
+        ("payout_id", "po_other"),
+        ("account_id", "acct_other"),
+        ("request_id", None),
+        ("payout", {}),
+        ("recorded_at", "2026-10-12T00:01:00+00:00"),
+    ],
+)
+def test_bank_read_only_recovery_requires_bound_provider_proof(bundle, field, value):
+    lookup = bank_read_only_recovery(bundle["gateway_runs"][0])
+    lookup[field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, False), (1, True)])
+def test_standalone_refund_recovery_follows_final_fiat_rollout(bundle, offset, valid):
+    at = datetime.fromisoformat(bundle["fiat_rollout"]["recorded_at"])
+    bundle["refund_recovery"]["started_at"] = (
+        at + timedelta(microseconds=offset)
+    ).isoformat()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("including refund_recovery" in e for e in check(bundle))
+
+
+def test_retry_cannot_relabel_the_original_readiness_even_within_five_minutes(bundle):
+    row = bundle["gateway_runs"][0]
+    _first, last = bank_timeout_then_retry(row)
+    last["readiness"] = deepcopy(row["payout_readiness"])
+    shift_evidence_times(last["readiness"], timedelta(0), "-relabeled")
+    assert any(
+        "new readiness observation after the prior POST outcome" in e
+        for e in check(bundle)
+    )
+
+
+def test_complete_bank_attempt_inventory_can_be_collected_after_initial_paid_observation(
+    bundle,
+):
+    row = bundle["gateway_runs"][0]
+    paid = datetime.fromisoformat(row["bank_payout"]["recorded_at"])
+    row["bank_dispatch_attempts"]["recorded_at"] = (
+        paid + timedelta(microseconds=1)
+    ).isoformat()
+    assert check(bundle) == []
