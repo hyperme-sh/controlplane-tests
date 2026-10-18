@@ -650,9 +650,17 @@ def bind_money_dispatch(row, mismatch=False):
         ),
     )
     outcome = refund.get("transfer_outcome") or {}
-    if outcome.get("kind") != "reversed":
+    if outcome.get("kind") not in ("reversed", "platform_loss"):
         return
-    reversal = outcome["provider_reversal"]
+    failed = outcome["kind"] == "platform_loss"
+    refusal = (
+        row.get("reversal_refusal", outcome.get("provider_refusal")) if failed else None
+    )
+    reversal = (
+        {"id": None, "created_at": refusal["recorded_at"]}
+        if failed
+        else outcome["provider_reversal"]
+    )
     transfer = row["connect_transfer"]
     due = settlement["reversal_due_cents"]
     fields = scope | {
@@ -665,7 +673,9 @@ def bind_money_dispatch(row, mismatch=False):
         "currency": "usd",
         "livemode": False,
         "idempotency_key": f"hm-sandbox-reversal:{row['billing_record_id']}:{due}",
-        "attempted_at": (
+        "attempted_at": refund["dispatch_checkpoint"]["recorded_at"]
+        if failed
+        else (
             datetime.fromisoformat(reversal["created_at"]) - timedelta(seconds=1)
         ).isoformat(),
     }
@@ -681,7 +691,9 @@ def bind_money_dispatch(row, mismatch=False):
             "owner-reverse-bound-" + row["id"],
             recorded_at=outcome["recorded_at"],
             source="payment_connect_reversal_dispatch",
-            status="reversed"
+            status="platform_loss"
+            if failed
+            else "reversed"
             if due == transfer["amount_cents"]
             else "partially_reversed",
             reversal_id=reversal["id"],
@@ -689,9 +701,11 @@ def bind_money_dispatch(row, mismatch=False):
             provider_request=record(
                 "owner-reverse-request-" + row["id"],
                 recorded_at=reversal["created_at"],
-                started_at=reversal["created_at"],
+                started_at=fields["attempted_at"] if failed else reversal["created_at"],
                 source="stripe_request",
-                request_id="req_reversal" + reversal["id"].replace("_", ""),
+                request_id=refusal["request_id"]
+                if failed
+                else "req_reversal" + reversal["id"].replace("_", ""),
                 method="POST",
                 path=f"/v1/transfers/{transfer['id']}/reversals",
                 livemode=False,
@@ -704,6 +718,21 @@ def bind_money_dispatch(row, mismatch=False):
             ),
         ),
     }
+
+    if failed:
+        checkpoint = outcome["owner_reversal"]["dispatch_checkpoint"]
+        checkpoint.update(
+            operator_required=True,
+            error="InvalidRequestError",
+            reversed_cents=0,
+            platform_loss_cents=due,
+            reversal={
+                k: fields[k] for k in ("amount_cents", "target_cents", "attempted_at")
+            },
+        )
+        checkpoint["provider_request"].update(
+            error_type="InvalidRequestError", code="balance_insufficient"
+        )
 
 
 def bind_policy_sequence(repeated):
@@ -1477,6 +1506,7 @@ def bundle():
         livemode=False,
         refund_balance_transaction=transaction,
     )
+    bind_money_dispatch(recovery)
     result["refund_recovery"] = recovery
     result["failed_deposit"] = refusal_record("failed-deposit", 2)
     result["repeated_mismatch"] = record(
@@ -5739,4 +5769,134 @@ def test_late_duplicate_bank_debit_cannot_hide_in_balanced_inventory(bundle, gro
         net=-extra["net"],
     )
     funding["transactions"].extend([extra, credit])
-    assert any("isolated funding window must contain exactly" in e for e in check(bundle))
+    assert any(
+        "isolated funding window must contain exactly" in e for e in check(bundle)
+    )
+
+
+def financial_row(bundle, group):
+    return (
+        bundle[group][0] if group in ("gateway_runs", "stripe_runs") else bundle[group]
+    )
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize("refunded", [1, 300, True])
+def test_source_recheck_cannot_admit_unaccounted_prior_refunds(bundle, group, refunded):
+    row = financial_row(bundle, group)
+    row["connect_dispatch"]["source_recheck"]["charge"]["amount_refunded"] = refunded
+    assert any("source-charge recheck" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_bank_plan_follows_source_transfer_and_payout_readiness(
+    bundle, group, offset, valid
+):
+    row = financial_row(bundle, group)
+    ready = datetime.fromisoformat(row["payout_readiness"]["recorded_at"])
+    row["bank_dispatch_plan"]["recorded_at"] = (
+        ready + timedelta(microseconds=offset)
+    ).isoformat()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("bank plan must follow source transfer" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("object", "charge"),
+        ("amount", 0),
+        ("amount", True),
+        ("amount", None),
+        ("payment_method_options", {}),
+        ("payment_method_options", {"crypto": {"mode": "payment"}}),
+    ],
+)
+def test_capture_event_retains_immutable_intent_fields(bundle, group, field, value):
+    row = financial_row(bundle, group)
+    row["payment"]["capture_event"]["data"]["object"][field] = value
+    assert any("succeeded event bound" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "part", ["owner_reversal", "dispatch_plan", "dispatch_checkpoint"]
+)
+def test_refused_reversal_requires_original_owner_authority(bundle, part):
+    outcome = bundle["refund_recovery"]["refund"]["transfer_outcome"]
+    if part == "owner_reversal":
+        outcome.pop(part)
+    else:
+        outcome["owner_reversal"].pop(part)
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "reversing"),
+        ("operator_required", False),
+        ("error", "ValueError"),
+        ("platform_loss_cents", 1),
+        ("reversed_cents", 20),
+        ("reversal", None),
+        ("reversal_id", "trr_unexpected"),
+        ("amount_cents", 1),
+        ("idempotency_key", "another-key"),
+    ],
+)
+def test_loss_checkpoint_retains_native_pending_reversal_and_outcome(
+    bundle, field, value
+):
+    outcome = bundle["refund_recovery"]["refund"]["transfer_outcome"]
+    outcome["owner_reversal"]["dispatch_checkpoint"][field] = value
+    assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("request_id", "req_unrelated"),
+        ("code", "other"),
+        ("error_type", "ValueError"),
+        ("parameters", {}),
+        ("idempotency_key", "other"),
+    ],
+)
+def test_loss_owner_request_binds_the_exact_provider_refusal(bundle, field, value):
+    outcome = bundle["refund_recovery"]["refund"]["transfer_outcome"]
+    outcome["owner_reversal"]["dispatch_checkpoint"]["provider_request"][field] = value
+    assert check(bundle)
+
+
+def test_loss_plan_cannot_predate_refund_owner_completion(bundle):
+    refund = bundle["refund_recovery"]["refund"]
+    plan = refund["transfer_outcome"]["owner_reversal"]["dispatch_plan"]
+    plan["recorded_at"] = (
+        datetime.fromisoformat(refund["dispatch_checkpoint"]["recorded_at"])
+        - timedelta(microseconds=1)
+    ).isoformat()
+    assert any("owner refund checkpoint must precede" in e for e in check(bundle))
+
+
+def test_refusal_cannot_predate_precise_reversal_request_start(bundle):
+    row = bundle["refund_recovery"]
+    refusal = datetime.fromisoformat(row["reversal_refusal"]["recorded_at"])
+    request = row["refund"]["transfer_outcome"]["owner_reversal"][
+        "dispatch_checkpoint"
+    ]["provider_request"]
+    request.update(
+        started_at=(refusal + timedelta(microseconds=1)).isoformat(),
+        recorded_at=(refusal + timedelta(microseconds=2)).isoformat(),
+    )
+    assert any(
+        "provider refusal must follow original reversal request start" in e
+        for e in check(bundle)
+    )
