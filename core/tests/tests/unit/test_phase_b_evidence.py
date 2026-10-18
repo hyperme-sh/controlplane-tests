@@ -704,7 +704,51 @@ def bind_money_dispatch(row, mismatch=False):
     }
 
 
-def bind_automatic_guard(row):
+def bind_policy_sequence(repeated):
+    count = cents = 0
+    for index, row in enumerate(repeated["attempts"]):
+        policy = row["policy_observation"]
+        amount = row["amount_cents"]
+        reason = (
+            "repeated_mismatch"
+            if index + 1 >= 3
+            else "daily_count_cap"
+            if count >= 2
+            else "daily_value_cap"
+            if cents + amount > 5000
+            else "eligible_pending_fee_accounting"
+        )
+        eligible = reason == "eligible_pending_fee_accounting"
+        policy.update(
+            eligible=eligible,
+            reason=reason,
+            reserved_cents=amount if eligible else 0,
+            daily_count_limit=2,
+            daily_value_limit_cents=5000,
+            repeat_threshold=3,
+            reserved_count_before=count,
+            reserved_total_cents_before=cents,
+        )
+        if eligible:
+            count += 1
+            cents += amount
+        policy.update(reserved_count_after=count, reserved_total_cents_after=cents)
+
+
+def bind_automatic_guard(row, repeated):
+    # Use a small eligible capture in tests of automatic dispatch; the other
+    # operator-only captures still fit native checkout admission and routing.
+    policy = deepcopy(row["policy_observation"])
+    replacement = refusal_record(
+        row["id"],
+        datetime.fromisoformat(row["recorded_at"]).hour,
+        mismatch=True,
+        amount=400,
+    )
+    row.clear()
+    row.update(replacement)
+    row["policy_observation"] = policy
+    bind_policy_sequence(repeated)
     policy = row["policy_observation"]
     policy.update(
         eligible=True,
@@ -948,7 +992,7 @@ def fresh_payout_readiness(row):
     return ready
 
 
-def refusal_record(name, hour, *, mismatch=False):
+def refusal_record(name, hour, *, mismatch=False, amount=400):
     at = datetime(2026, 10, 12, hour, tzinfo=UTC)
     scope = {
         "tenant_id": "11111111-1111-1111-1111-111111111111",
@@ -962,8 +1006,8 @@ def refusal_record(name, hour, *, mismatch=False):
         "status": "succeeded" if mismatch else "requires_payment_method",
         "livemode": False,
         "currency": "usd",
-        "amount": 400,
-        "amount_received": 400 if mismatch else 0,
+        "amount": amount,
+        "amount_received": amount if mismatch else 0,
         "payment_method_types": ["crypto"],
         "latest_charge": "py_" + token if mismatch else None,
         "last_payment_error": {"code": "payment_failed"},
@@ -980,8 +1024,8 @@ def refusal_record(name, hour, *, mismatch=False):
         started_at=(at - timedelta(minutes=3)).isoformat(),
         attempt_id="attempt-" + token,
         payment_intent_id=intent["id"],
-        amount_cents=400,
-        subtotal_cents=400,
+        amount_cents=amount,
+        subtotal_cents=amount,
         tax_payable=None,
         no_lease_started=True,
         actor_sub="sandbox-actor",
@@ -1019,7 +1063,7 @@ def refusal_record(name, hour, *, mismatch=False):
                 "status": "succeeded",
                 "paid": True,
                 "captured": True,
-                "amount": 400,
+                "amount": amount,
                 "currency": "usd",
                 "livemode": False,
                 "payment_method_details": {
@@ -1043,13 +1087,13 @@ def refusal_record(name, hour, *, mismatch=False):
         )
     if mismatch:
         refund_id = "pyr_mismatch" + token
-        key = f"lease-settle-{scope['billing_record_id']}-400"
+        key = f"lease-settle-{scope['billing_record_id']}-{amount}"
         charge_tx = {
             "id": "txn_mismatchcharge" + token,
             "source": row["charge"]["id"],
-            "amount": 400,
+            "amount": amount,
             "fee": 10,
-            "net": 390,
+            "net": amount - 10,
             "currency": "usd",
             "type": "charge",
             "status": "available",
@@ -1057,9 +1101,9 @@ def refusal_record(name, hour, *, mismatch=False):
         refund_tx = {
             "id": "txn_mismatchrefund" + token,
             "source": refund_id,
-            "amount": -400,
+            "amount": -amount,
             "fee": 0,
-            "net": -400,
+            "net": -amount,
             "currency": "usd",
             "type": "refund",
             "status": "available",
@@ -1074,7 +1118,7 @@ def refusal_record(name, hour, *, mismatch=False):
             "id": refund_id,
             "payment_intent": intent["id"],
             "charge": row["charge"]["id"],
-            "amount": 400,
+            "amount": amount,
             "currency": "usd",
             "status": "succeeded",
             "livemode": False,
@@ -1090,7 +1134,7 @@ def refusal_record(name, hour, *, mismatch=False):
             refund_id=refund_id,
             payment_intent_id=intent["id"],
             charge_id=row["charge"]["id"],
-            amount_cents=400,
+            amount_cents=amount,
             currency="usd",
             status="succeeded",
             livemode=False,
@@ -1119,7 +1163,7 @@ def refusal_record(name, hour, *, mismatch=False):
             currency="usd",
             livemode=False,
             owner_checkpoint="checkpoint-" + token,
-            principal_refunded_cents=400,
+            principal_refunded_cents=amount,
             host_payable_cents=0,
             retained_fee_cost_cents=10,
             charge_balance_transaction=charge_tx,
@@ -1149,8 +1193,8 @@ def refusal_record(name, hour, *, mismatch=False):
             **scope,
             owner_checkpoint=checkpoint,
             plan={
-                "reserved_amount_cents": 400,
-                "refund_cents": 400,
+                "reserved_amount_cents": amount,
+                "refund_cents": amount,
                 "delivered_cents": 0,
                 "pass_stripe_amount": False,
                 "currency": "usd",
@@ -1169,7 +1213,7 @@ def refusal_record(name, hour, *, mismatch=False):
         row["provider_event"]["data"]["object"] = deepcopy(row["intent"])
         row["charge"].update(
             object="charge",
-            amount_captured=400,
+            amount_captured=amount,
             amount_refunded=0,
             refunded=False,
             created=int((at - timedelta(seconds=90)).timestamp()),
@@ -1444,7 +1488,8 @@ def bundle():
         operator_required=True,
         reason="repeated_mismatch",
         attempts=[
-            refusal_record(f"mismatch-{i}", i + 2, mismatch=True) for i in range(3)
+            refusal_record(f"mismatch-{i}", i + 2, mismatch=True, amount=6000)
+            for i in range(3)
         ],
     )
     failure = result["failed_bank_payout"]
@@ -1603,6 +1648,7 @@ def bundle():
         operator_required=True,
         reason="repeated_mismatch",
     )
+    bind_policy_sequence(repeated)
     for row in [
         *result["gateway_runs"],
         *result["stripe_runs"],
@@ -2025,6 +2071,11 @@ def test_non_stablecoin_source_requires_decoupling_prerequisite(bundle):
     payment["intent"]["metadata"]["payment_rail"] = "stripe_checkout"
     payment["intent"]["metadata"]["payment_flow"] = "checkout"
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
+        if candidate["payment"] is payment:
+            candidate["connect_dispatch"]["source_recheck"]["charge"][
+                "payment_method_details"
+            ] = deepcopy(payment["charge"]["payment_method_details"])
     payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     assert check(bundle)
     bundle["fiat_rollout"]["prerequisites"].append(
@@ -2206,6 +2257,11 @@ def test_conditional_prerequisite_closure_is_required_separately(bundle):
         payment_rail="stripe_checkout", payment_flow="checkout"
     )
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
+        if candidate["payment"] is payment:
+            candidate["connect_dispatch"]["source_recheck"]["charge"][
+                "payment_method_details"
+            ] = deepcopy(payment["charge"]["payment_method_details"])
     payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     bundle["fiat_rollout"]["prerequisites"].append(
         record(
@@ -2738,6 +2794,11 @@ def test_stablecoin_label_cannot_bypass_non_stablecoin_prerequisite(bundle, fiel
         payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     else:
         payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
+        if candidate["payment"] is payment:
+            candidate["connect_dispatch"]["source_recheck"]["charge"][
+                "payment_method_details"
+            ] = deepcopy(payment["charge"]["payment_method_details"])
     assert any("stablecoin source requires provider rail" in e for e in check(bundle))
 
 
@@ -3083,6 +3144,9 @@ def test_buyer_wallet_normalization_is_case_insensitive(bundle):
     payment["charge"]["payment_method_details"]["crypto"]["buyer_address"] = (
         "0x" + "Ab" * 20
     )
+    bundle["stripe_runs"][0]["connect_dispatch"]["source_recheck"]["charge"][
+        "payment_method_details"
+    ] = deepcopy(payment["charge"]["payment_method_details"])
     assert check(bundle) == []
 
 
@@ -3569,6 +3633,9 @@ def authorize_simulated_fixture(row):
     )
     payment["charge"]["payment_method_details"]["crypto"]["transaction_hash"] = (
         SANDBOX_SUCCESS_MARKER
+    )
+    row["connect_dispatch"]["source_recheck"]["charge"]["payment_method_details"] = (
+        deepcopy(payment["charge"]["payment_method_details"])
     )
     return binding
 
@@ -4534,7 +4601,7 @@ def test_terminal_mismatch_refunds_reconcile_all_transaction_fees(bundle, status
         ("charge", "ch_wrong"),
         ("currency", "eur"),
         ("amount", 0),
-        ("amount", 401),
+        ("amount", 6001),
         ("amount", True),
         ("livemode", True),
         ("balance_transaction", None),
@@ -4974,7 +5041,7 @@ def test_mismatch_refund_approval_is_bound_server_provenance(bundle, field, valu
 @pytest.mark.parametrize("index,valid", [(0, True), (2, False)])
 def test_repeat_threshold_forbids_automatic_refund_approval(bundle, index, valid):
     row = bundle["repeated_mismatch"]["attempts"][index]
-    bind_automatic_guard(row)
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
     if valid:
         assert check(bundle) == []
     else:
@@ -5092,7 +5159,7 @@ def test_automatic_approval_cannot_override_persisted_ineligible_policy(
     bundle, field, value
 ):
     row = bundle["repeated_mismatch"]["attempts"][0]
-    bind_automatic_guard(row)
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
     row["policy_observation"][field] = value
     assert any(
         "automatic refund must bind eligible persisted policy" in e
@@ -5122,7 +5189,7 @@ def test_automatic_creation_guard_must_hold_current_reservation_through_io(
     bundle, field, value
 ):
     row = bundle["repeated_mismatch"]["attempts"][0]
-    bind_automatic_guard(row)
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
     row["automatic_guard"][field] = value
     assert any("automatic" in e for e in check(bundle))
 
@@ -5135,7 +5202,7 @@ def test_automatic_refund_guard_requires_fresh_unmodified_fee_evidence(
     bundle, field, value
 ):
     row = bundle["repeated_mismatch"]["attempts"][0]
-    bind_automatic_guard(row)
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
     row["automatic_guard"]["fee_observation"][field] = value
     assert any("unchanged fee proof" in e for e in check(bundle))
 
@@ -5338,7 +5405,10 @@ def test_simulation_operation_ids_are_native_canonical_uuid_strings(
 def test_succeeded_mismatch_refund_can_return_processing_fees(bundle, kind, status):
     final = bundle["repeated_mismatch"]["attempts"][0]["final_accounting"]
     final["refund_balance_transaction"].update(
-        type=kind, status=status, fee=-3, net=-397
+        type=kind,
+        status=status,
+        fee=-3,
+        net=3 - bundle["repeated_mismatch"]["attempts"][0]["amount_cents"],
     )
     final["retained_fee_cost_cents"] = 7
     assert check(bundle) == []
@@ -5351,7 +5421,9 @@ def test_returned_refund_fee_reconciles_with_standalone_charge_cost(bundle, oper
     row = bundle["repeated_mismatch"]["attempts"][0]
     standalone_fees(row, operator=operator)
     final = row["final_accounting"]
-    final["refund_balance_transaction"].update(fee=-3, net=-397)
+    final["refund_balance_transaction"].update(
+        fee=-3, net=3 - bundle["repeated_mismatch"]["attempts"][0]["amount_cents"]
+    )
     final["retained_fee_cost_cents"] = 7
     assert check(bundle) == []
 
@@ -5364,6 +5436,11 @@ def non_stablecoin_gateway_fixture(bundle):
         payment_rail="stripe_checkout", payment_flow="checkout"
     )
     payment["charge"]["payment_method_details"] = {"type": "card", "card": {}}
+    for candidate in [*bundle["gateway_runs"], *bundle["stripe_runs"]]:
+        if candidate["payment"] is payment:
+            candidate["connect_dispatch"]["source_recheck"]["charge"][
+                "payment_method_details"
+            ] = deepcopy(payment["charge"]["payment_method_details"])
     payment["capture_event"]["data"]["object"] = deepcopy(payment["intent"])
     bundle["fiat_rollout"]["prerequisites"].append(
         record(
@@ -5432,3 +5509,105 @@ def test_ordinary_refund_cannot_replace_native_retry_key_even_when_copied_everyw
     original = row["settlement"]["refund_idempotency_key"]
     replace_tax_revision_everywhere(row, original, "hm-refund-manual")
     assert any("native lease-settle" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_refund_plan_origin_is_bounded_by_original_checkout(bundle, offset, valid):
+    row = bundle["stripe_runs"][0]
+    plan = row["refund"]["dispatch_plan"]
+    at = datetime.fromisoformat(row["payment"]["checkout_created_at"]) + timedelta(
+        microseconds=offset
+    )
+    plan["attempted_at"] = plan["recorded_at"] = at.isoformat()
+    row["refund"]["dispatch_checkpoint"]["attempted_at"] = at.isoformat()
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "follow original checkout/payment chronology" in e for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize("rate", [None, False, 0, 1, "1.0"])
+def test_automatic_guard_rejects_any_native_currency_conversion(bundle, rate):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
+    row["automatic_guard"]["fee_observation"]["charge_balance_transaction"][
+        "exchange_rate"
+    ] = rate
+    if rate is None:
+        assert check(bundle) == []
+    else:
+        assert any("unchanged fee proof" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        None,
+        {"type": "crypto", "crypto": {"network": "base", "token_currency": "usdc"}},
+        {"type": "card", "card": {"brand": "different"}},
+    ],
+)
+def test_nonstable_source_recheck_preserves_immutable_original_charge_details(
+    bundle, details
+):
+    row = non_stablecoin_gateway_fixture(bundle)
+    row["connect_dispatch"]["source_recheck"]["charge"]["payment_method_details"] = (
+        details
+    )
+    assert any("source-charge recheck" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("eligible", True),
+        ("reason", "eligible_pending_fee_accounting"),
+        ("reserved_cents", 400),
+        ("daily_count_limit", 3),
+        ("daily_value_limit_cents", 10000),
+        ("repeat_threshold", 4),
+    ],
+)
+def test_third_mismatch_must_persist_native_repeat_refusal_and_fixed_limits(
+    bundle, field, value
+):
+    bundle["repeated_mismatch"]["attempts"][2]["policy_observation"][field] = value
+    assert any("each persisted native policy result" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "eligible",
+        "reason",
+        "reserved_cents",
+        "daily_count_limit",
+        "daily_value_limit_cents",
+        "repeat_threshold",
+    ],
+)
+def test_every_mismatch_policy_observation_includes_native_decision_fields(
+    bundle, index, field
+):
+    bundle["repeated_mismatch"]["attempts"][index]["policy_observation"].pop(field)
+    assert any("each persisted native policy result" in e for e in check(bundle))
+
+
+def test_repeat_journey_cannot_checkout_after_two_reserved_small_refunds(bundle):
+    repeated = bundle["repeated_mismatch"]
+    for row in repeated["attempts"][:2]:
+        policy = deepcopy(row["policy_observation"])
+        replacement = refusal_record(
+            row["id"],
+            datetime.fromisoformat(row["recorded_at"]).hour,
+            mismatch=True,
+            amount=400,
+        )
+        row.clear()
+        row.update(replacement)
+        row["policy_observation"] = policy
+    bind_policy_sequence(repeated)
+    assert any("already reserved native daily refund cap" in e for e in check(bundle))
