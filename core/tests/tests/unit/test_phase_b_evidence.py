@@ -6051,3 +6051,96 @@ def test_same_second_refund_and_reversal_use_precise_owner_order(bundle, valid):
             "owner refund checkpoint must precede reversal preparation" in e
             for e in check(bundle)
         )
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+@pytest.mark.parametrize(
+    "case", ["same_second", "earlier_provider_second", "request_before_sending"]
+)
+def test_connect_dispatch_compares_provider_creation_at_native_precision(
+    bundle, group, case
+):
+    row = financial_row(bundle, group)
+    transfer = row["connect_transfer"]
+    native = datetime.fromisoformat(transfer["created_at"])
+
+    def at(micros):
+        return (native + timedelta(microseconds=micros)).isoformat()
+
+    authority = row["connect_dispatch"]
+    for stage in ("prepared", "dispatching", "succeeded"):
+        authority[stage]["state"]["attempted_at"] = at(50000)
+    authority["prepared"]["recorded_at"] = at(100000)
+    authority["source_recheck"]["recorded_at"] = at(150000)
+    authority["dispatching"]["recorded_at"] = at(200000)
+    authority["provider_request"]["recorded_at"] = at(
+        100000 if case == "request_before_sending" else 300000
+    )
+    authority["succeeded"]["recorded_at"] = at(400000)
+    inventory = row["transfer_inventory"]
+    inventory["window_start_at"] = at(50000)
+    inventory["filters"]["created"]["gte"] = int(native.timestamp())
+    if case == "earlier_provider_second":
+        transfer["created_at"] = (native - timedelta(seconds=1)).isoformat()
+        inventory["data"][0]["created_at"] = transfer["created_at"]
+    if case == "same_second":
+        assert check(bundle) == []
+    else:
+        assert any(
+            "Connect plan must persist" in e or "Connect provider creation/request" in e
+            for e in check(bundle)
+        )
+
+
+@pytest.mark.parametrize(
+    "suffix", ["dest_common", "common_", "_common", "dest__common"]
+)
+def test_shared_underscored_destination_payment_cannot_cross_special_exercises(
+    bundle, suffix
+):
+    def destination(row, value):
+        old = row["connect_transfer"]["destination_payment"]
+        row["connect_transfer"]["destination_payment"] = value
+        for item in row["transfer_inventory"]["data"]:
+            if item.get("destination_payment") == old:
+                item["destination_payment"] = value
+        for tx in row.get("bank_funding", {}).get("transactions", []):
+            if tx.get("source") == old:
+                tx["source"] = value
+
+    recovery, failed = bundle["refund_recovery"], bundle["failed_bank_payout"]
+    destination(recovery, "py_" + suffix)
+    destination(failed, "py_distinct_" + suffix)
+    assert check(bundle) == []
+    destination(failed, "py_" + suffix)
+    errors = check(bundle)
+    assert errors == [
+        "failed_bank_payout: provider financial identities must be distinct from refund_recovery"
+    ]
+
+
+@pytest.mark.parametrize(
+    "kind,index", [("operator", 0), ("operator", 2), ("automatic", 0)]
+)
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_mismatch_approval_follows_its_persisted_policy(
+    bundle, kind, index, offset, valid
+):
+    repeated = bundle["repeated_mismatch"]
+    row = repeated["attempts"][index]
+    if kind == "automatic":
+        bind_automatic_guard(row, repeated)
+    policy_at = datetime.fromisoformat(row["policy_observation"]["recorded_at"])
+    approved = (policy_at + timedelta(microseconds=offset)).isoformat()
+    row["refund_approval"]["approved_at"] = approved
+    row["refund_plan"]["plan"][f"{kind}_approved_mismatch_at"] = approved
+    for stage in ("dispatch_plan", "dispatch_checkpoint"):
+        row["refund"][stage]["approval_at"] = approved
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "mismatch policy must persist before approval" in e for e in check(bundle)
+        )
