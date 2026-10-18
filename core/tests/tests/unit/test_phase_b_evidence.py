@@ -1690,6 +1690,26 @@ def bundle():
         bind_connect_dispatch(row)
         if "bank_funding" in row:
             bind_source_type(row, row.get("bank_payout", row))
+    rollout = result["fiat_rollout"]
+    rollout["started_at"] = "2026-10-12T00:10:00+00:00"
+    for stage, observed in (
+        ("enrollments_before", "00:05:00"),
+        ("enrollments_after", "00:25:00"),
+    ):
+        rows = rollout[stage]
+        rollout[stage] = record(
+            stage,
+            recorded_at=f"2026-10-12T{observed}+00:00",
+            source="payment_connect_recipient_inventory",
+            scope="environment",
+            environment="test",
+            platform_account_id="acct_platform",
+            complete=True,
+            has_more=False,
+            filters={},
+            total_count=len(rows),
+            data=rows,
+        )
     return result
 
 
@@ -2093,7 +2113,7 @@ def test_missing_prerequisite_and_infra_closure_fail(bundle):
 
 @pytest.mark.parametrize("key", ["stripe_account_id", "attempt_id"])
 def test_rollout_cannot_replace_existing_enrollment(bundle, key):
-    bundle["fiat_rollout"]["enrollments_after"][0][key] = "replacement"
+    bundle["fiat_rollout"]["enrollments_after"]["data"][0][key] = "replacement"
     assert check(bundle)
 
 
@@ -2160,8 +2180,12 @@ def test_malformed_enrollment_payout_reference_returns_errors(bundle):
 
 
 def test_rollout_recipient_must_match_journey_owner_binding(bundle):
-    bundle["fiat_rollout"]["enrollments_before"][0]["stripe_account_id"] = "acct_other"
-    bundle["fiat_rollout"]["enrollments_after"][0]["stripe_account_id"] = "acct_other"
+    bundle["fiat_rollout"]["enrollments_before"]["data"][0]["stripe_account_id"] = (
+        "acct_other"
+    )
+    bundle["fiat_rollout"]["enrollments_after"]["data"][0]["stripe_account_id"] = (
+        "acct_other"
+    )
     assert check(bundle)
 
 
@@ -2238,7 +2262,7 @@ def test_card_payout_is_not_a_bank_payout(bundle):
 
 
 def test_harmless_snapshot_fields_do_not_change_bindings(bundle):
-    bundle["fiat_rollout"]["enrollments_after"][0].update(
+    bundle["fiat_rollout"]["enrollments_after"]["data"][0].update(
         payout_method="fiat_bank", capability="active"
     )
     assert check(bundle) == []
@@ -4185,11 +4209,11 @@ def test_bank_retry_authority_cannot_be_reused_for_another_payout(bundle, field)
 
 
 def test_legacy_missing_policy_backfills_only_fixed_native_migration_defaults(bundle):
-    before = bundle["fiat_rollout"]["enrollments_before"][0]
+    before = bundle["fiat_rollout"]["enrollments_before"]["data"][0]
     before.pop("payout_method")
     before.pop("eligibility_rule_version")
     assert check(bundle) == []
-    bundle["fiat_rollout"]["enrollments_after"][0].update(
+    bundle["fiat_rollout"]["enrollments_after"]["data"][0].update(
         payout_method="usdc", eligibility_rule_version="usdc-stablecoin/v1"
     )
     assert any("history was lost or replaced" in e for e in check(bundle))
@@ -4205,13 +4229,14 @@ def add_historical_usdc_enrollment(bundle):
         "eligibility_rule_version": "usdc-stablecoin/v1",
     }
     for stage in ("enrollments_before", "enrollments_after"):
-        bundle["fiat_rollout"][stage].append(deepcopy(row))
+        bundle["fiat_rollout"][stage]["data"].append(deepcopy(row))
+        bundle["fiat_rollout"][stage]["total_count"] += 1
 
 
 def test_existing_usdc_history_survives_fiat_default_rollout(bundle):
     add_historical_usdc_enrollment(bundle)
     assert check(bundle) == []
-    bundle["fiat_rollout"]["enrollments_after"][-1].update(
+    bundle["fiat_rollout"]["enrollments_after"]["data"][-1].update(
         payout_method="fiat_bank", eligibility_rule_version="fiat-us/v1"
     )
     assert any("history was lost or replaced" in e for e in check(bundle))
@@ -4233,7 +4258,7 @@ def test_existing_usdc_history_survives_fiat_default_rollout(bundle):
 def test_rollout_requires_complete_native_method_and_admission_policy(
     bundle, stage, mutation
 ):
-    row = bundle["fiat_rollout"][stage][0]
+    row = bundle["fiat_rollout"][stage]["data"][0]
     if mutation == "missing_method":
         row.pop("payout_method")
     elif mutation == "missing_rule":
@@ -5900,3 +5925,129 @@ def test_refusal_cannot_predate_precise_reversal_request_start(bundle):
         "provider refusal must follow original reversal request start" in e
         for e in check(bundle)
     )
+
+
+@pytest.mark.parametrize("stage", ["enrollments_before", "enrollments_after"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("complete", False),
+        ("complete", None),
+        ("has_more", True),
+        ("total_count", 0),
+        ("total_count", True),
+        ("filters", {"host_org_id": "survivor-only"}),
+        ("scope", "tenant"),
+        ("source", "untrusted"),
+        ("platform_account_id", "acct_other"),
+    ],
+)
+def test_rollout_inventories_are_complete_environment_wide_owner_reads(
+    bundle, stage, field, value
+):
+    bundle["fiat_rollout"][stage][field] = value
+    assert any(
+        "complete authoritative unfiltered enrollment" in e for e in check(bundle)
+    )
+
+
+def test_rollout_cannot_hide_a_second_enrollment_by_omitting_both_copies(bundle):
+    add_historical_usdc_enrollment(bundle)
+    # Both native totals remain two even if a projection drops the historical host.
+    for name in ("enrollments_before", "enrollments_after"):
+        bundle["fiat_rollout"][name]["data"].pop()
+    assert any(
+        "complete authoritative unfiltered enrollment" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("stage", ["enrollments_before", "enrollments_after"])
+def test_rollout_requires_equal_full_enrollment_identity_sets(bundle, stage):
+    add_historical_usdc_enrollment(bundle)
+    snapshot = bundle["fiat_rollout"][stage]
+    snapshot["data"].pop()
+    snapshot["total_count"] -= 1
+    assert any("history was lost or replaced" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "stage,at",
+    [
+        ("enrollments_before", "2026-10-12T00:11:00+00:00"),
+        ("enrollments_after", "2026-10-12T00:09:00+00:00"),
+        ("enrollments_after", "2026-10-12T00:31:00+00:00"),
+    ],
+)
+def test_complete_inventory_observations_bracket_rollout(bundle, stage, at):
+    bundle["fiat_rollout"][stage]["recorded_at"] = at
+    assert any("inventories must bracket rollout" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("field", ["lease_id", "billing_record_id"])
+def test_failed_bank_scope_is_distinct_from_standalone_refund_recovery(bundle, field):
+    bundle["failed_bank_payout"][field] = bundle["refund_recovery"][field]
+    assert any(
+        "exercise requires distinct lease and billing" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("payment", "payment_intent_id"),
+        ("payment", "charge_id"),
+        ("connect_transfer", "id"),
+        ("connect_transfer", "destination_payment"),
+        ("payment", "capture_event", "id"),
+        ("bank_dispatch_checkpoint", "provider_request", "request_id"),
+    ],
+)
+def test_failed_bank_cannot_reuse_recovery_financial_provider_identity(bundle, path):
+    failure, recovery = bundle["failed_bank_payout"], bundle["refund_recovery"]
+    if path == ("bank_dispatch_checkpoint", "provider_request", "request_id"):
+        value = recovery["reversal_refusal"]["request_id"]
+    else:
+        value = recovery
+        for key in path:
+            value = value[key]
+    target = failure
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    assert any(
+        "provider financial identities must be distinct" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_same_second_refund_and_reversal_use_precise_owner_order(bundle, valid):
+    row = bundle["stripe_runs"][0]
+    refund = row["refund"]
+    native = datetime.fromisoformat(refund["created_at"])
+
+    def at(micros):
+        return (native + timedelta(microseconds=micros)).isoformat()
+
+    refund["dispatch_checkpoint"]["recorded_at"] = at(100000)
+    outcome = refund["transfer_outcome"]
+    reversal = outcome["provider_reversal"]
+    reversal["created_at"] = refund["created_at"]
+    outcome["reversal_inventory"]["data"][0] = deepcopy(reversal)
+    for tx in row["bank_funding"]["transactions"]:
+        if tx["type"] == "payment_refund":
+            tx["created_at"] = tx["available_at"] = reversal["created_at"]
+    owner = outcome["owner_reversal"]
+    plan = owner["dispatch_plan"]
+    plan["attempted_at"] = plan["recorded_at"] = at(200000 if valid else 40000)
+    checkpoint = owner["dispatch_checkpoint"]
+    checkpoint["attempted_at"] = plan["attempted_at"]
+    checkpoint["provider_request"].update(
+        started_at=at(300000 if valid else 50000), recorded_at=at(400000)
+    )
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any(
+            "owner refund checkpoint must precede reversal preparation" in e
+            for e in check(bundle)
+        )
