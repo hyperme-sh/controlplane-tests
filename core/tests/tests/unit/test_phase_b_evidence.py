@@ -5694,3 +5694,49 @@ def test_automatic_refund_owner_guard_uses_precise_request_time_not_provider_sec
     )
     checkpoint["provider_request"].update(started_at=at(500000), recorded_at=at(600000))
     assert check(bundle) == []
+
+
+@pytest.mark.parametrize("kind", ["gateway", "stripe", "failed"])
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_bank_inventory_cannot_close_before_terminal_dispatch(
+    bundle, kind, offset, valid
+):
+    row = (
+        bundle["failed_bank_payout"]
+        if kind == "failed"
+        else bundle["gateway_runs" if kind == "gateway" else "stripe_runs"][0]
+    )
+    funding = row["bank_funding"]
+    terminal = datetime.fromisoformat(row["bank_dispatch_checkpoint"]["recorded_at"])
+    if kind == "failed":
+        # Keep the returned-funds proof complete while moving terminal reconciliation.
+        terminal = datetime.fromisoformat(funding["closing_balance"]["recorded_at"])
+        row["bank_dispatch_checkpoint"]["recorded_at"] = terminal.isoformat()
+        row["bank_dispatch"]["recorded_at"] = terminal.isoformat()
+    closing = (terminal + timedelta(microseconds=offset)).isoformat()
+    funding["closing_balance"]["recorded_at"] = funding["window_end_at"] = closing
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("terminal bank dispatch reconciliation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_late_duplicate_bank_debit_cannot_hide_in_balanced_inventory(bundle, group):
+    row = bundle[group] if group == "failed_bank_payout" else bundle[group][0]
+    funding = row["bank_funding"]
+    at = funding["closing_balance"]["recorded_at"]
+    debit = next(tx for tx in funding["transactions"] if tx["type"] == "payout")
+    extra = deepcopy(debit)
+    extra.update(id="txn_duplicatepayout", source="po_duplicate", created_at=at)
+    # Offset the extra debit so net/balance equality alone cannot detect it.
+    credit = deepcopy(extra)
+    credit.update(
+        id="txn_duplicatecredit",
+        source="py_unrelated",
+        type="payment",
+        amount=-extra["amount"],
+        net=-extra["net"],
+    )
+    funding["transactions"].extend([extra, credit])
+    assert any("isolated funding window must contain exactly" in e for e in check(bundle))
