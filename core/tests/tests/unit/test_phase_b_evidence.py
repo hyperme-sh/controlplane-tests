@@ -525,9 +525,8 @@ def sync_bank_to_outcome(row):
         refund["recorded_at"] = (at - timedelta(seconds=5)).isoformat()
         refund["inventory"]["recorded_at"] = (at - timedelta(seconds=3)).isoformat()
         outcome["recorded_at"] = (at - timedelta(seconds=4)).isoformat()
-        outcome["provider_refusal"]["recorded_at"] = (
-            at - timedelta(seconds=5)
-        ).isoformat()
+        refusal = outcome.get("provider_refusal", row.get("reversal_refusal"))
+        refusal["recorded_at"] = (at - timedelta(seconds=5)).isoformat()
         refund["inventory"]["data"][0]["created_at"] = refund["created_at"]
         refund["discovery"] = record(
             "refund-discovered-" + row["id"],
@@ -1490,8 +1489,6 @@ def bundle():
         ),
     }
     recovery = record("stripe-recovery", 8, short_balance=True, recovered=True)
-    for key in ("bank_payout", "bank_followup", "bank_funding"):
-        recovery.pop(key, None)
     scope = {
         key: recovery[key]
         for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
@@ -1531,6 +1528,7 @@ def bundle():
         available_cents=0,
         amount_cents=20,
     )
+    sync_bank_to_outcome(recovery)
     empty_reversals(recovery)
     transaction = {
         "status": "available",
@@ -6249,7 +6247,8 @@ def test_shared_underscored_destination_payment_cannot_cross_special_exercises(
     destination(failed, "py_" + suffix)
     errors = check(bundle)
     assert errors == [
-        "failed_bank_payout: provider financial identities must be distinct from refund_recovery"
+        "failed_bank_payout: provider financial identities must be distinct from refund_recovery",
+        "failed_bank_payout: destination payment reused across financial scopes",
     ]
 
 
@@ -6528,6 +6527,29 @@ def bank_read_only_recovery(row):
             "destination": payout["bank_id"],
             "source_type": payout["source_type"],
             "metadata": deepcopy(payout["metadata"]),
+        },
+    )
+    lookup = attempt["reconciliation"]
+    native_created = int(datetime.fromisoformat(payout["created_at"]).timestamp())
+    lookup["creation_event"] = record(
+        "payout-created-event-" + row["id"],
+        recorded_at=lookup["recorded_at"],
+        source="stripe_event",
+        attempt_id=attempt["attempt_id"],
+        event={
+            "id": "evt_created" + row["id"].replace("-", ""),
+            "object": "event",
+            "type": "payout.created",
+            "livemode": False,
+            "account": payout["account_id"],
+            "created": native_created,
+            "request": {
+                "id": "req_created" + row["id"].replace("-", ""),
+                "idempotency_key": checkpoint["idempotency_key"],
+            },
+            "data": {
+                "object": dict(deepcopy(lookup["payout"]), created=native_created)
+            },
         },
     )
     return attempt["reconciliation"]
@@ -7185,3 +7207,184 @@ def test_complete_charge_lifetime_inventory_exposes_pre_attempt_duplicate(
         earlier["metadata"][field] = row[field]
     inventory["data"].append(earlier)
     assert any("exactly one provider transfer" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "target_group",
+    ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"],
+)
+@pytest.mark.parametrize("suffix", ["shared", "shared_payment"])
+def test_destination_payment_is_unique_across_all_financial_scopes(
+    bundle, target_group, suffix
+):
+    first = bundle["gateway_runs"][0]
+    other = (
+        bundle["gateway_runs"][1]
+        if target_group == "gateway_runs"
+        else financial_row(bundle, target_group)
+    )
+    shared = "py_" + suffix
+    for row in [first, other]:
+        original = row["connect_transfer"]["destination_payment"]
+        replace_tax_revision_everywhere(row, original, shared)
+    assert any(
+        "destination payment reused across financial scopes" in e for e in check(bundle)
+    )
+
+
+@pytest.mark.parametrize("value", [400.0, True, None])
+def test_receipt_tax_provenance_requires_native_integer_cents(bundle, value):
+    bundle["receipt"]["frozen_tax_calculation"]["amount_cents"] = value
+    assert any("frozen tax calculation policy provenance" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "missing_origin",
+        "wrong_source",
+        "wrong_type",
+        "wrong_account",
+        "live",
+        "wrong_key",
+        "wrong_request",
+        "no_request",
+        "wrong_payout",
+        "float_amount",
+        "automatic",
+        "mutated_metadata",
+        "bad_created",
+        "before_post",
+        "after_lookup",
+    ],
+)
+def test_lost_post_recovery_requires_immutable_creation_request_lineage(
+    bundle, mutation
+):
+    row = bundle["gateway_runs"][0]
+    lookup = bank_read_only_recovery(row)
+    creation = lookup["creation_event"]
+    event = creation["event"]
+    if mutation == "missing":
+        lookup.pop("creation_event")
+    elif mutation == "missing_origin":
+        creation.pop("attempt_id")
+    elif mutation == "wrong_source":
+        creation["source"] = "owner_log"
+    elif mutation == "wrong_type":
+        event["type"] = "payout.updated"
+    elif mutation == "wrong_account":
+        event["account"] = "acct_other"
+    elif mutation == "live":
+        event["livemode"] = True
+    elif mutation == "wrong_key":
+        event["request"]["idempotency_key"] = "different-manual-call"
+    elif mutation == "wrong_request":
+        row["bank_dispatch_checkpoint"]["provider_request"]["request_id"] = "req_known"
+        row["bank_dispatch_attempts"]["data"][0]["provider_request"]["request_id"] = (
+            "req_known"
+        )
+        bind_bank_failure(row["bank_dispatch_attempts"]["data"][0])
+    elif mutation == "no_request":
+        event["request"] = None
+    elif mutation == "wrong_payout":
+        event["data"]["object"]["id"] = "po_manualOther"
+    elif mutation == "float_amount":
+        event["data"]["object"]["amount"] = float(event["data"]["object"]["amount"])
+    elif mutation == "automatic":
+        event["data"]["object"]["automatic"] = True
+    elif mutation == "mutated_metadata":
+        event["data"]["object"]["metadata"] = {}
+    elif mutation == "bad_created":
+        event["data"]["object"]["created"] = False
+    elif mutation == "before_post":
+        event["data"]["object"]["created"] -= 60
+    elif mutation == "after_lookup":
+        creation["recorded_at"] = (
+            datetime.fromisoformat(lookup["recorded_at"]) + timedelta(seconds=1)
+        ).isoformat()
+    assert any("lineage" in e for e in check(bundle))
+
+
+def test_creation_event_may_follow_payout_creation_within_same_original_request(bundle):
+    row = bundle["gateway_runs"][0]
+    lookup = bank_read_only_recovery(row)
+    lookup["creation_event"]["event"]["created"] += 1
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "bank_payout",
+        "bank_funding",
+        "bank_followup",
+        "bank_dispatch_plan",
+        "bank_dispatch_checkpoint",
+    ],
+)
+def test_standalone_recovery_requires_prior_completed_bank_debit(bundle, field):
+    bundle["refund_recovery"].pop(field)
+    assert any("refund_recovery" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "pending_credit",
+        "late_availability",
+        "missing_debit",
+        "unrelated_debit",
+        "pending_payout",
+        "refund_known_before_payout",
+        "refused_before_debit",
+    ],
+)
+def test_standalone_loss_cannot_use_pending_transfer_liquidity(bundle, mutation):
+    row = bundle["refund_recovery"]
+    funding = row["bank_funding"]
+    credit, debit = funding["transactions"][:2]
+    if mutation == "pending_credit":
+        credit["status"] = "pending"
+    elif mutation == "late_availability":
+        credit["available_at"] = row["recorded_at"]
+    elif mutation == "missing_debit":
+        funding["transactions"].remove(debit)
+    elif mutation == "unrelated_debit":
+        debit["source"] = "po_unrelated"
+    elif mutation == "pending_payout":
+        row["bank_payout"]["status"] = "pending"
+    elif mutation == "refund_known_before_payout":
+        row["refund"]["discovery"]["recorded_at"] = row["bank_payout"]["created_at"]
+    elif mutation == "refused_before_debit":
+        row["reversal_refusal"]["recorded_at"] = credit["created_at"]
+    assert any("refund_recovery" in e for e in check(bundle))
+
+
+def test_lost_payout_response_can_recover_with_known_matching_request_id(bundle):
+    row = bundle["gateway_runs"][0]
+    lookup = bank_read_only_recovery(row)
+    request_id = lookup["creation_event"]["event"]["request"]["id"]
+    row["bank_dispatch_checkpoint"]["provider_request"]["request_id"] = request_id
+    attempt = row["bank_dispatch_attempts"]["data"][0]
+    attempt["provider_request"]["request_id"] = request_id
+    bind_bank_failure(attempt)
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize("identity", ["event", "request"])
+def test_provider_payout_creation_lineage_cannot_cross_financial_plans(
+    bundle, identity
+):
+    first, second = [bank_read_only_recovery(row) for row in bundle["gateway_runs"][:2]]
+    assert check(bundle) == []
+    original, other = (
+        first["creation_event"]["event"],
+        second["creation_event"]["event"],
+    )
+    if identity == "event":
+        other["id"] = original["id"]
+    else:
+        other["request"]["id"] = original["request"]["id"]
+    assert any("lineage reused across plans" in e for e in check(bundle))
