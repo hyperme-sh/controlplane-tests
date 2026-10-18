@@ -920,7 +920,9 @@ def bind_connect_dispatch(row):
     inventory.update(
         destination=None,
         scope="platform",
-        window_start_at=frozen["attempted_at"],
+        window_start_at=datetime.fromtimestamp(
+            row["payment"]["charge"]["created"], UTC
+        ).isoformat(),
         window_end_at=inventory["recorded_at"],
     )
     inventory["filters"] = {
@@ -4709,6 +4711,11 @@ def test_simulation_must_precede_native_charge_creation_with_second_precision(
     row["connect_dispatch"]["source_recheck"]["charge"]["created"] = row["payment"][
         "charge"
     ]["created"]
+    inventory = row["transfer_inventory"]
+    inventory["window_start_at"] = datetime.fromtimestamp(
+        row["payment"]["charge"]["created"], UTC
+    ).isoformat()
+    inventory["filters"]["created"]["gte"] = row["payment"]["charge"]["created"]
     if offset < 0:
         assert any("owner-authorized sandbox simulation" in e for e in check(bundle))
     else:
@@ -5482,7 +5489,7 @@ def test_complete_platform_inventory_can_include_unrelated_transfer(bundle):
         ("window_start_at", "2026-10-12T04:59:59+00:00"),
     ],
 )
-def test_global_inventory_must_span_every_destination_since_original_attempt(
+def test_global_inventory_must_span_every_destination_since_charge_creation(
     bundle, field, value
 ):
     bundle["stripe_runs"][0]["transfer_inventory"][field] = value
@@ -6207,8 +6214,6 @@ def test_connect_dispatch_compares_provider_creation_at_native_precision(
     )
     authority["succeeded"]["recorded_at"] = at(400000)
     inventory = row["transfer_inventory"]
-    inventory["window_start_at"] = at(50000)
-    inventory["filters"]["created"]["gte"] = int(native.timestamp())
     if case == "earlier_provider_second":
         transfer["created_at"] = (native - timedelta(seconds=1)).isoformat()
         inventory["data"][0]["created_at"] = transfer["created_at"]
@@ -7087,3 +7092,96 @@ def test_taxed_mismatch_plan_cannot_replace_zero_allocation_with_boolean(bundle)
     plan["stripe_tax_allocation"]["retained_tax_cents"] = False
     bind_money_dispatch(row, mismatch=True)
     assert any("frozen compute/tax refund allocation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "account,valid",
+    [
+        ("acct_Ab012Z", True),
+        ("acct_" + "a" * 250, True),
+        ("acct_bad_id", False),
+        ("acct__bad", False),
+        ("acct_bad_", False),
+        ("acct_", False),
+        ("acct_" + "a" * 251, False),
+        ("acct_bad-id", False),
+    ],
+)
+def test_complete_enrollment_uses_native_account_identifier_grammar(
+    bundle, account, valid
+):
+    replace_tax_revision_everywhere(bundle, "acct_host", account)
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_connect_request_cannot_substitute_float_cents(bundle, group):
+    row = financial_row(bundle, group)
+    parameters = row["connect_dispatch"]["provider_request"]["parameters"]
+    parameters["amount"] = float(parameters["amount"])
+    assert any("Connect provider request must bind native" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("value", [20.0, True])
+def test_reversal_inventory_must_retain_native_typed_amount(bundle, value):
+    outcome = bundle["stripe_runs"][0]["refund"]["transfer_outcome"]
+    outcome["reversal_inventory"]["data"][0]["amount"] = value
+    assert type(outcome["provider_reversal"]["amount"]) is int
+    assert any("exactly one provider reversal" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_transfer_inventory_cannot_omit_charge_lifetime_before_owner_attempt(
+    bundle, group
+):
+    row = financial_row(bundle, group)
+    inventory = row["transfer_inventory"]
+    attempted = row["connect_dispatch"]["prepared"]["state"]["attempted_at"]
+    assert datetime.fromisoformat(
+        inventory["window_start_at"]
+    ) < datetime.fromisoformat(attempted)
+    inventory["window_start_at"] = attempted
+    inventory["filters"]["created"]["gte"] = int(
+        datetime.fromisoformat(attempted).timestamp()
+    )
+    assert any("source charge creation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("tie", ["charge", "billing", "lease"])
+@pytest.mark.parametrize(
+    "group", ["gateway_runs", "stripe_runs", "refund_recovery", "failed_bank_payout"]
+)
+def test_complete_charge_lifetime_inventory_exposes_pre_attempt_duplicate(
+    bundle, tie, group
+):
+    row = financial_row(bundle, group)
+    inventory = row["transfer_inventory"]
+    assert check(bundle) == []
+    earlier = deepcopy(inventory["data"][0])
+    earlier.update(
+        id="tr_beforeOwnerAttempt",
+        destination="acct_other",
+        source_transaction="ch_unrelated",
+        metadata={},
+    )
+    earlier["created_at"] = (
+        datetime.fromtimestamp(row["payment"]["charge"]["created"], UTC)
+        + timedelta(seconds=1)
+    ).isoformat()
+    assert datetime.fromisoformat(earlier["created_at"]) < datetime.fromisoformat(
+        row["connect_dispatch"]["prepared"]["state"]["attempted_at"]
+    )
+    if tie == "charge":
+        earlier["source_transaction"] = row["payment"]["charge_id"]
+    else:
+        field = "billing_record_id" if tie == "billing" else "lease_id"
+        earlier["metadata"][field] = row[field]
+    inventory["data"].append(earlier)
+    assert any("exactly one provider transfer" in e for e in check(bundle))
