@@ -631,6 +631,7 @@ def bind_money_dispatch(row, mismatch=False):
         provider_request=record(
             "request-refund-" + row["id"],
             recorded_at=refund["created_at"],
+            started_at=refund["created_at"],
             source="stripe_request",
             request_id="req_refund" + refund["refund_id"].replace("_", ""),
             method="POST",
@@ -688,6 +689,7 @@ def bind_money_dispatch(row, mismatch=False):
             provider_request=record(
                 "owner-reverse-request-" + row["id"],
                 recorded_at=reversal["created_at"],
+                started_at=reversal["created_at"],
                 source="stripe_request",
                 request_id="req_reversal" + reversal["id"].replace("_", ""),
                 method="POST",
@@ -5611,3 +5613,84 @@ def test_repeat_journey_cannot_checkout_after_two_reserved_small_refunds(bundle)
         row["policy_observation"] = policy
     bind_policy_sequence(repeated)
     assert any("already reserved native daily refund cap" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("offset,valid", [(-1, False), (0, True), (1, True)])
+def test_global_transfer_inventory_waits_for_terminal_owner_dispatch(
+    bundle, offset, valid
+):
+    row = bundle["stripe_runs"][0]
+    terminal = datetime.fromisoformat(
+        row["connect_dispatch"]["succeeded"]["recorded_at"]
+    )
+    inventory = row["transfer_inventory"]
+    at = terminal + timedelta(microseconds=offset)
+    inventory["recorded_at"] = inventory["window_end_at"] = at.isoformat()
+    inventory["filters"]["created"]["lte"] = int(at.timestamp())
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("terminal owner dispatch reconciliation" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("start_offset,valid", [(200000, True), (50000, False)])
+def test_same_second_transfer_and_refund_use_precise_owner_request_order(
+    bundle, start_offset, valid
+):
+    row = bundle["stripe_runs"][0]
+    refund = row["refund"]
+    created = datetime.fromisoformat(row["connect_transfer"]["created_at"])
+    row["connect_dispatch"]["succeeded"]["recorded_at"] = (
+        created + timedelta(microseconds=100000)
+    ).isoformat()
+    refund["created_at"] = row["connect_transfer"]["created_at"]
+    refund["inventory"]["data"][0]["created_at"] = refund["created_at"]
+    plan = refund["dispatch_plan"]
+    plan["attempted_at"] = plan["recorded_at"] = (
+        created + timedelta(microseconds=start_offset)
+    ).isoformat()
+    checkpoint = refund["dispatch_checkpoint"]
+    checkpoint["attempted_at"] = plan["attempted_at"]
+    checkpoint["recorded_at"] = (created + timedelta(microseconds=600000)).isoformat()
+    checkpoint["provider_request"].update(
+        started_at=plan["attempted_at"],
+        recorded_at=(created + timedelta(microseconds=500000)).isoformat(),
+    )
+    if valid:
+        assert check(bundle) == []
+    else:
+        assert any("owner transfer completion must precede" in e for e in check(bundle))
+
+
+def test_automatic_refund_owner_guard_uses_precise_request_time_not_provider_second(
+    bundle,
+):
+    row = bundle["repeated_mismatch"]["attempts"][0]
+    bind_automatic_guard(row, bundle["repeated_mismatch"])
+    created = datetime.fromisoformat(row["refund"]["created_at"])
+
+    def at(micros):
+        return (created + timedelta(microseconds=micros)).isoformat()
+
+    approval = row["refund_approval"]
+    approval.update(approved_at=at(100000), recorded_at=at(150000))
+    raw = row["refund_plan"]
+    raw["recorded_at"] = at(250000)
+    raw["plan"].update(
+        stripe_refund_attempted_at=at(200000), automatic_approved_mismatch_at=at(100000)
+    )
+    row["automatic_guard"].update(
+        checked_before_at=at(350000),
+        checked_after_at=at(400000),
+        recorded_at=at(450000),
+    )
+    refund = row["refund"]
+    refund["dispatch_plan"].update(
+        attempted_at=at(200000), recorded_at=at(300000), approval_at=at(100000)
+    )
+    checkpoint = refund["dispatch_checkpoint"]
+    checkpoint.update(
+        attempted_at=at(200000), recorded_at=at(700000), approval_at=at(100000)
+    )
+    checkpoint["provider_request"].update(started_at=at(500000), recorded_at=at(600000))
+    assert check(bundle) == []
