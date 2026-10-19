@@ -637,8 +637,56 @@ def assert_subject_scope_delta(before, after):
 
 
 def assert_journal_schema_delta(after):
+    assert_control_proof_schema_delta(after)
     assert "usdc_deposit_addresses_hd_index_seq" not in after["sequences"]
     for table in ("connect_recipient_accounts", "payer_mismatch_accounts", "billing_tax_orders", "billing_tax_calculations"):
         assert after["tables"].pop(table)["rls"] == [True, True]
     for function in ("connect_recipient_progress_only()", "connect_recipient_immutable()", "tax_history_retained()", "tax_order_binding()", "tax_calculation_progress()"):
         assert after["functions"].pop(function)
+
+
+def assert_control_proof_schema_delta(after):
+    proofs = after["tables"].pop("connect_control_proofs")
+    assert proofs["rls"] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in proofs["columns"]] == [
+        ("id", "uuid", True), ("tenant_id", "uuid", True),
+        ("host_org_id", "uuid", True), ("enrollment_attempt_id", "uuid", True),
+        ("account_id", "character varying(255)", True),
+        ("bank_id", "character varying(255)", True),
+        ("owner_sub", "character varying(512)", True),
+        ("challenge_nonce", "character varying(64)", True),
+        ("ownership_snapshot", "jsonb", True),
+        ("created_at", "timestamp with time zone", True),
+        ("expires_at", "timestamp with time zone", True),
+        ("report", "jsonb", False),
+        ("accepted_at", "timestamp with time zone", False),
+    ]
+    constraints = {row[0]: row[2] for row in proofs["constraints"]}
+    assert set(constraints) == {
+        "connect_control_proofs_pkey", "connect_control_proofs_tenant_id_fkey",
+        "uq_control_nonce", "ck_control_nonce", "ck_control_owner",
+        "ck_control_account", "ck_control_bank", "ck_control_lifetime", "ck_control_accepted",
+    }
+    assert constraints["uq_control_nonce"] == "UNIQUE (challenge_nonce)"
+    assert "REFERENCES tenants(id) ON DELETE RESTRICT" in constraints["connect_control_proofs_tenant_id_fkey"]
+    assert "accepted_at IS NOT NULL" in constraints["ck_control_accepted"]
+    assert "expires_at > created_at" in constraints["ck_control_lifetime"]
+    assert len(proofs["policies"]) == 4
+    assert {p[0] for p in proofs["policies"]} == {
+        "control_proof_select", "control_proof_insert", "control_proof_update", "control_proof_delete",
+    }
+    assert all("app.current_tenant_id" in str(p) for p in proofs["policies"])
+    assert {t[0] for t in proofs["triggers"]} == {
+        "control_proof_update", "control_proof_delete", "control_proof_truncate",
+    }
+    for name, definition, enabled in proofs["triggers"]:
+        assert enabled == "O"
+        if name == "control_proof_update":
+            assert "BEFORE UPDATE" in definition and "control_proof_once()" in definition
+        else:
+            assert "connect_recipient_immutable()" in definition
+            assert ("BEFORE DELETE" if name == "control_proof_delete" else "BEFORE TRUNCATE") in definition
+    guard = after["functions"].pop("control_proof_once()")
+    assert "OLD.report IS NOT NULL OR NEW.report IS NULL OR NEW.accepted_at IS NULL" in guard["definition"]
+    assert "IS DISTINCT FROM" in guard["definition"]
+    assert "RAISE EXCEPTION" in guard["definition"]
