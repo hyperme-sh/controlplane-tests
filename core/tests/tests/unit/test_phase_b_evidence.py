@@ -7757,3 +7757,73 @@ def test_bank_retention_keeps_the_original_prepared_plan_clock(bundle):
         "23-hour retry window" in error
         for error in check(bundle, commit_time=COMMIT_TIME - timedelta(days=2))
     )
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "wrong_provider",
+        "omitted_retry",
+        "early_lookup",
+        "wrong_lineage",
+        "lookup_reuse",
+    ],
+)
+def test_bank_recovery_can_bind_earlier_post_after_failed_retry(
+    bundle, group, mutation
+):
+    row = financial_row(bundle, group)
+    lookup = bank_read_only_recovery(row)
+    inventory = row["bank_dispatch_attempts"]
+    original = inventory["data"][0]
+    prior = datetime.fromisoformat(original["recorded_at"])
+    retry = deepcopy(original)
+    retry.pop("reconciliation")
+    retry.pop("failure")
+    retry.update(
+        id=original["id"] + "-later-retry",
+        sequence=2,
+        attempt_id=str(uuid5(NAMESPACE_URL, "late-bank-retry-" + row["id"])),
+        outcome="provider_error",
+        started_at=(prior + timedelta(microseconds=100000)).isoformat(),
+        recorded_at=(prior + timedelta(microseconds=200000)).isoformat(),
+    )
+    retry["provider_request"].update(
+        id=retry["provider_request"]["id"] + "-later-retry",
+        request_id="req_later" + row["id"].replace("-", ""),
+        payout_id=None,
+        recorded_at=retry["recorded_at"],
+    )
+    ready = deepcopy(row["payout_readiness"])
+    shift_evidence_times(
+        ready,
+        prior
+        + timedelta(microseconds=50000)
+        - datetime.fromisoformat(ready["recorded_at"]),
+        "-later-retry",
+    )
+    retry["readiness"] = ready
+    bind_bank_failure(retry, provider=True)
+    inventory["data"].append(retry)
+    inventory["total_count"] = row["bank_dispatch_checkpoint"]["attempt_count"] = 2
+    if mutation == "wrong_provider":
+        row["bank_dispatch_checkpoint"]["provider_attempt_id"] = retry["attempt_id"]
+    elif mutation == "omitted_retry":
+        inventory["data"].pop()
+    elif mutation == "early_lookup":
+        lookup["creation_event"]["recorded_at"] = (
+            prior + timedelta(microseconds=150000)
+        ).isoformat()
+    elif mutation == "wrong_lineage":
+        lookup["creation_event"]["event"]["request"]["id"] = retry["provider_request"][
+            "request_id"
+        ]
+    elif mutation == "lookup_reuse":
+        lookup["request_id"] = retry["provider_request"]["request_id"]
+    errors = check(bundle)
+    if mutation is None:
+        assert errors == []
+    else:
+        assert errors
