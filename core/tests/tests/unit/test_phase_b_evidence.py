@@ -7769,6 +7769,7 @@ def test_bank_retention_keeps_the_original_prepared_plan_clock(bundle):
         "early_lookup",
         "wrong_lineage",
         "lookup_reuse",
+        "wrong_origin",
     ],
 )
 def test_bank_recovery_can_bind_earlier_post_after_failed_retry(
@@ -7822,8 +7823,59 @@ def test_bank_recovery_can_bind_earlier_post_after_failed_retry(
         ]
     elif mutation == "lookup_reuse":
         lookup["request_id"] = retry["provider_request"]["request_id"]
+    elif mutation == "wrong_origin":
+        lookup["creation_event"]["attempt_id"] = retry["attempt_id"]
+        retry["provider_request"]["request_id"] = None
+        retry.update(outcome="transport_error", error_type="TimeoutError")
+        bind_bank_failure(retry)
     errors = check(bundle)
+    if mutation == "wrong_origin":
+        assert any(
+            "immutable payout.created request/idempotency lineage" in error
+            for error in errors
+        )
     if mutation is None:
         assert errors == []
     else:
         assert errors
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("later", ["post", "not_sent"])
+def test_successful_bank_post_cannot_have_later_intents(bundle, group, later):
+    row = financial_row(bundle, group)
+    inventory = row["bank_dispatch_attempts"]
+    original = inventory["data"][0]
+    if later == "post":
+        failed = deepcopy(original)
+        failed.update(
+            id=original["id"] + "-impossible",
+            sequence=2,
+            attempt_id=str(uuid5(NAMESPACE_URL, row["id"] + "impossible")),
+            outcome="transport_error",
+        )
+        failed["provider_request"].update(
+            id=original["provider_request"]["id"] + "-impossible",
+            payout_id=None,
+            request_id=None,
+        )
+        bind_bank_failure(failed)
+        inventory["data"].append(failed)
+        inventory["total_count"] = row["bank_dispatch_checkpoint"]["attempt_count"] = 2
+    else:
+        original["journal_sequence"] = 1
+        row["bank_non_post_intents"] = [{"sequence": 2, "outcome": "not_sent"}]
+    assert any("terminal successful POST" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_initial_readiness_cannot_predate_plan_attempt(bundle, group):
+    row = financial_row(bundle, group)
+    initial = deepcopy(row["payout_readiness"])
+    shift_evidence_times(initial, timedelta(0), "-prepared-initial")
+    plan = row["bank_dispatch_plan"]
+    plan["initial_readiness"] = initial
+    plan["attempted_at"] = (
+        datetime.fromisoformat(initial["recorded_at"]) + timedelta(microseconds=1)
+    ).isoformat()
+    assert any("initial readiness predates" in error for error in check(bundle))
