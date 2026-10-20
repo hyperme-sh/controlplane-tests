@@ -6696,7 +6696,7 @@ def test_retry_cannot_relabel_the_original_readiness_even_within_five_minutes(bu
     last["readiness"] = deepcopy(row["payout_readiness"])
     shift_evidence_times(last["readiness"], timedelta(0), "-relabeled")
     assert any(
-        "new readiness observation after the prior POST outcome" in e
+        "new readiness observation after the prior journal outcome" in e
         for e in check(bundle)
     )
 
@@ -7711,3 +7711,225 @@ def test_platform_inventory_allows_unrelated_payout_in_another_account(bundle):
     contexts[1]["data"] = [unrelated]
     contexts[1]["total_count"] = 1
     assert check(bundle) == []
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("invalid_initial", [False, True])
+def test_bank_initial_readiness_and_post_refresh_are_distinct(
+    bundle, group, invalid_initial
+):
+    row = financial_row(bundle, group)
+    initial = deepcopy(row["payout_readiness"])
+
+    def rename(value):
+        if isinstance(value, dict):
+            if "id" in value and "revision" in value:
+                value["id"] += "-initial"
+            for child in value.values():
+                rename(child)
+        elif isinstance(value, list):
+            for child in value:
+                rename(child)
+
+    rename(initial)
+    plan = row["bank_dispatch_plan"]
+    plan["initial_readiness"] = initial
+    planned = datetime.fromisoformat(plan["recorded_at"])
+    row["payout_readiness"]["recorded_at"] = (
+        planned + timedelta(seconds=1)
+    ).isoformat()
+    if invalid_initial:
+        initial["recorded_at"] = (planned + timedelta(microseconds=1)).isoformat()
+        assert any(
+            "bank plan must follow source transfer" in error for error in check(bundle)
+        )
+    else:
+        assert check(bundle) == []
+
+
+def test_bank_retention_keeps_the_original_prepared_plan_clock(bundle):
+    row = bundle["refund_recovery"]
+    started = datetime.fromisoformat(row["bank_dispatch_checkpoint"]["attempted_at"])
+    row["bank_dispatch_plan"]["attempted_at"] = (
+        started - timedelta(hours=23)
+    ).isoformat()
+    assert any(
+        "23-hour retry window" in error
+        for error in check(bundle, commit_time=COMMIT_TIME - timedelta(days=2))
+    )
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "wrong_provider",
+        "omitted_retry",
+        "early_lookup",
+        "wrong_lineage",
+        "lookup_reuse",
+        "wrong_origin",
+    ],
+)
+def test_bank_recovery_can_bind_earlier_post_after_failed_retry(
+    bundle, group, mutation
+):
+    row = financial_row(bundle, group)
+    lookup = bank_read_only_recovery(row)
+    inventory = row["bank_dispatch_attempts"]
+    original = inventory["data"][0]
+    prior = datetime.fromisoformat(original["recorded_at"])
+    retry = deepcopy(original)
+    retry.pop("reconciliation")
+    retry.pop("failure")
+    retry.update(
+        id=original["id"] + "-later-retry",
+        sequence=2,
+        attempt_id=str(uuid5(NAMESPACE_URL, "late-bank-retry-" + row["id"])),
+        outcome="provider_error",
+        started_at=(prior + timedelta(microseconds=100000)).isoformat(),
+        recorded_at=(prior + timedelta(microseconds=200000)).isoformat(),
+    )
+    retry["provider_request"].update(
+        id=retry["provider_request"]["id"] + "-later-retry",
+        request_id="req_later" + row["id"].replace("-", ""),
+        payout_id=None,
+        recorded_at=retry["recorded_at"],
+    )
+    ready = deepcopy(row["payout_readiness"])
+    shift_evidence_times(
+        ready,
+        prior
+        + timedelta(microseconds=50000)
+        - datetime.fromisoformat(ready["recorded_at"]),
+        "-later-retry",
+    )
+    retry["readiness"] = ready
+    bind_bank_failure(retry, provider=True)
+    inventory["data"].append(retry)
+    inventory["total_count"] = row["bank_dispatch_checkpoint"]["attempt_count"] = 2
+    if mutation == "wrong_provider":
+        row["bank_dispatch_checkpoint"]["provider_attempt_id"] = retry["attempt_id"]
+    elif mutation == "omitted_retry":
+        inventory["data"].pop()
+    elif mutation == "early_lookup":
+        lookup["creation_event"]["recorded_at"] = (
+            prior + timedelta(microseconds=150000)
+        ).isoformat()
+    elif mutation == "wrong_lineage":
+        lookup["creation_event"]["event"]["request"]["id"] = retry["provider_request"][
+            "request_id"
+        ]
+    elif mutation == "lookup_reuse":
+        lookup["request_id"] = retry["provider_request"]["request_id"]
+    elif mutation == "wrong_origin":
+        lookup["creation_event"]["attempt_id"] = retry["attempt_id"]
+        retry["provider_request"]["request_id"] = None
+        retry.update(outcome="transport_error", error_type="TimeoutError")
+        bind_bank_failure(retry)
+    errors = check(bundle)
+    if mutation == "wrong_origin":
+        assert any(
+            "immutable payout.created request/idempotency lineage" in error
+            for error in errors
+        )
+    if mutation is None:
+        assert errors == []
+    else:
+        assert errors
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("later", ["post", "not_sent"])
+def test_successful_bank_post_cannot_have_later_intents(bundle, group, later):
+    row = financial_row(bundle, group)
+    inventory = row["bank_dispatch_attempts"]
+    original = inventory["data"][0]
+    if later == "post":
+        failed = deepcopy(original)
+        failed.update(
+            id=original["id"] + "-impossible",
+            sequence=2,
+            attempt_id=str(uuid5(NAMESPACE_URL, row["id"] + "impossible")),
+            outcome="transport_error",
+        )
+        failed["provider_request"].update(
+            id=original["provider_request"]["id"] + "-impossible",
+            payout_id=None,
+            request_id=None,
+        )
+        bind_bank_failure(failed)
+        inventory["data"].append(failed)
+        inventory["total_count"] = row["bank_dispatch_checkpoint"]["attempt_count"] = 2
+    else:
+        original["journal_sequence"] = 1
+        row["bank_non_post_intents"] = [{"sequence": 2, "outcome": "not_sent"}]
+    assert any("terminal successful POST" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+def test_initial_readiness_cannot_predate_plan_attempt(bundle, group):
+    row = financial_row(bundle, group)
+    initial = deepcopy(row["payout_readiness"])
+    shift_evidence_times(initial, timedelta(0), "-prepared-initial")
+    plan = row["bank_dispatch_plan"]
+    plan["initial_readiness"] = initial
+    plan["attempted_at"] = (
+        datetime.fromisoformat(initial["recorded_at"]) + timedelta(microseconds=1)
+    ).isoformat()
+    assert any("initial readiness predates" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "stale_readiness",
+        "late_completion",
+        "duplicate_sequence",
+        "missing_position",
+        "wrong_plan",
+        "wrong_outcome",
+    ],
+)
+def test_retry_chronology_includes_excluded_intents(bundle, group, mutation):
+    row = financial_row(bundle, group)
+    first, last = bank_timeout_then_retry(row)
+    first["journal_sequence"] = 1
+    last["journal_sequence"] = 3
+    end = datetime.fromisoformat(first["recorded_at"]) + timedelta(microseconds=100000)
+    raw_plan = deepcopy(first["plan"])
+    raw_plan.pop("payment_intent_id")
+    raw_plan.pop("idempotency_key")
+    intent = {
+        "attempt_id": str(uuid5(NAMESPACE_URL, row["id"] + "-not-sent")),
+        "sequence": 2,
+        "outcome": "not_sent",
+        "plan": raw_plan,
+        "parameters": deepcopy(first["provider_request"]["parameters"]),
+        "idempotency_key": first["provider_request"]["idempotency_key"],
+        "started_at": first["recorded_at"],
+        "completed_at": end.isoformat(),
+    }
+    row["bank_non_post_intents"] = [intent]
+    if mutation == "stale_readiness":
+        last["readiness"]["recorded_at"] = first["recorded_at"]
+    elif mutation == "late_completion":
+        intent["completed_at"] = last["recorded_at"]
+    elif mutation == "duplicate_sequence":
+        intent["sequence"] = 1
+    elif mutation == "missing_position":
+        last.pop("journal_sequence")
+    elif mutation == "wrong_plan":
+        intent["plan"]["bank_id"] = "ba_other"
+    elif mutation == "wrong_outcome":
+        intent["outcome"] = "uncertain"
+    errors = check(bundle)
+    if mutation is None:
+        assert errors == []
+    elif mutation == "stale_readiness":
+        assert any("prior journal outcome" in error for error in errors)
+    else:
+        assert errors
