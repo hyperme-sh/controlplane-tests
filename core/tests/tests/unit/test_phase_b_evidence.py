@@ -6696,7 +6696,7 @@ def test_retry_cannot_relabel_the_original_readiness_even_within_five_minutes(bu
     last["readiness"] = deepcopy(row["payout_readiness"])
     shift_evidence_times(last["readiness"], timedelta(0), "-relabeled")
     assert any(
-        "new readiness observation after the prior POST outcome" in e
+        "new readiness observation after the prior journal outcome" in e
         for e in check(bundle)
     )
 
@@ -7879,3 +7879,57 @@ def test_initial_readiness_cannot_predate_plan_attempt(bundle, group):
         datetime.fromisoformat(initial["recorded_at"]) + timedelta(microseconds=1)
     ).isoformat()
     assert any("initial readiness predates" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "stale_readiness",
+        "late_completion",
+        "duplicate_sequence",
+        "missing_position",
+        "wrong_plan",
+        "wrong_outcome",
+    ],
+)
+def test_retry_chronology_includes_excluded_intents(bundle, group, mutation):
+    row = financial_row(bundle, group)
+    first, last = bank_timeout_then_retry(row)
+    first["journal_sequence"] = 1
+    last["journal_sequence"] = 3
+    end = datetime.fromisoformat(first["recorded_at"]) + timedelta(microseconds=100000)
+    raw_plan = deepcopy(first["plan"])
+    raw_plan.pop("payment_intent_id")
+    raw_plan.pop("idempotency_key")
+    intent = {
+        "attempt_id": str(uuid5(NAMESPACE_URL, row["id"] + "-not-sent")),
+        "sequence": 2,
+        "outcome": "not_sent",
+        "plan": raw_plan,
+        "parameters": deepcopy(first["provider_request"]["parameters"]),
+        "idempotency_key": first["provider_request"]["idempotency_key"],
+        "started_at": first["recorded_at"],
+        "completed_at": end.isoformat(),
+    }
+    row["bank_non_post_intents"] = [intent]
+    if mutation == "stale_readiness":
+        last["readiness"]["recorded_at"] = first["recorded_at"]
+    elif mutation == "late_completion":
+        intent["completed_at"] = last["recorded_at"]
+    elif mutation == "duplicate_sequence":
+        intent["sequence"] = 1
+    elif mutation == "missing_position":
+        last.pop("journal_sequence")
+    elif mutation == "wrong_plan":
+        intent["plan"]["bank_id"] = "ba_other"
+    elif mutation == "wrong_outcome":
+        intent["outcome"] = "uncertain"
+    errors = check(bundle)
+    if mutation is None:
+        assert errors == []
+    elif mutation == "stale_readiness":
+        assert any("prior journal outcome" in error for error in errors)
+    else:
+        assert errors
