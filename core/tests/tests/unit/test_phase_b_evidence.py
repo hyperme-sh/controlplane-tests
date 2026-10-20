@@ -7711,3 +7711,49 @@ def test_platform_inventory_allows_unrelated_payout_in_another_account(bundle):
     contexts[1]["data"] = [unrelated]
     contexts[1]["total_count"] = 1
     assert check(bundle) == []
+
+
+@pytest.mark.parametrize("group", ["gateway_runs", "stripe_runs", "failed_bank_payout"])
+@pytest.mark.parametrize("invalid_initial", [False, True])
+def test_bank_initial_readiness_and_post_refresh_are_distinct(
+    bundle, group, invalid_initial
+):
+    row = financial_row(bundle, group)
+    initial = deepcopy(row["payout_readiness"])
+
+    def rename(value):
+        if isinstance(value, dict):
+            if "id" in value and "revision" in value:
+                value["id"] += "-initial"
+            for child in value.values():
+                rename(child)
+        elif isinstance(value, list):
+            for child in value:
+                rename(child)
+
+    rename(initial)
+    plan = row["bank_dispatch_plan"]
+    plan["initial_readiness"] = initial
+    planned = datetime.fromisoformat(plan["recorded_at"])
+    row["payout_readiness"]["recorded_at"] = (
+        planned + timedelta(seconds=1)
+    ).isoformat()
+    if invalid_initial:
+        initial["recorded_at"] = (planned + timedelta(microseconds=1)).isoformat()
+        assert any(
+            "bank plan must follow source transfer" in error for error in check(bundle)
+        )
+    else:
+        assert check(bundle) == []
+
+
+def test_bank_retention_keeps_the_original_prepared_plan_clock(bundle):
+    row = bundle["refund_recovery"]
+    started = datetime.fromisoformat(row["bank_dispatch_checkpoint"]["attempted_at"])
+    row["bank_dispatch_plan"]["attempted_at"] = (
+        started - timedelta(hours=23)
+    ).isoformat()
+    assert any(
+        "23-hour retry window" in error
+        for error in check(bundle, commit_time=COMMIT_TIME - timedelta(days=2))
+    )
