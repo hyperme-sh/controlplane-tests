@@ -304,3 +304,25 @@ def test_source_authority_and_boundary_errors_prevent_publication(
 
 def test_json_pointer_escape_is_literal_not_a_path_operation():
     assert assembly.child({"a/b~c": 7}, assembly.tokens("/a~1b~0c")[0]) == 7
+
+
+def test_whole_canonical_observation_can_be_imported_without_a_wrapper(
+    packet, tmp_path
+):
+    path, manifest, original = packet
+    base_path = tmp_path / "base.json"
+    base = json.loads(base_path.read_text())
+    recovery = base.pop("refund_recovery")
+    manifest["base"] = save(base_path, base)
+    manifest["imports"].append(
+        {
+            "artifact": save(tmp_path / "recovery.json", recovery),
+            "pointer": "",
+            "target": "/refund_recovery",
+        }
+    )
+    save(path, manifest)
+    assembled = assembly.assemble(path)
+    assert evidence.check(assembled) == []
+    assembled.pop("assembly_provenance")
+    assert assembled == original
