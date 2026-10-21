@@ -20,6 +20,7 @@ spec = importlib.util.spec_from_file_location(
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 REVISION = "a" * 40
+ENROLLMENT_ATTEMPT = str(uuid5(NAMESPACE_URL, "original-enrollment"))
 COMMIT_TIME = datetime(2026, 10, 12, tzinfo=UTC)
 
 
@@ -467,7 +468,7 @@ def record(name, hour=1, **fields):
                 "tenant_id": scope["tenant_id"],
                 "host_org_id": scope["host_org_id"],
                 "stripe_account_id": transfer["account_id"],
-                "enrollment_attempt_id": "original",
+                "enrollment_attempt_id": ENROLLMENT_ATTEMPT,
             },
         )
     if name.startswith(("gateway-", "stripe-", "ok-")):
@@ -883,7 +884,14 @@ def bind_connect_dispatch(row):
         if raw["id"] == transfer["id"]:
             raw["source_type"] = transfer["source_type"]
     at = datetime.fromisoformat(transfer["created_at"])
-    profile = {"legal_type": "individual", "country": "US", "state": "CA"}
+    profile = {
+        "legal_type": "individual",
+        "country": "US",
+        "state": "CA",
+        "payout_method": "fiat_bank",
+        "eligibility_rule_version": "fiat-us/v1",
+        "enrollment_attempt_id": ENROLLMENT_ATTEMPT,
+    }
     row["readiness"]["recipient_profile"] = profile.copy()
     frozen = {
         k: row[k] for k in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
@@ -1473,7 +1481,7 @@ def bundle():
             connect_onboarding=True,
             bank_payout_id="po_" + uuid5(NAMESPACE_URL, "stripe-5").hex,
             stripe_account_id="acct_host",
-            attempt_id="original",
+            attempt_id=ENROLLMENT_ATTEMPT,
             tenant_id="11111111-1111-1111-1111-111111111111",
             host_org_id="22222222-2222-2222-2222-222222222222",
             enrolled_at="2026-10-12T01:00:00+00:00",
@@ -1558,7 +1566,7 @@ def bundle():
                 {
                     "tenant_id": "11111111-1111-1111-1111-111111111111",
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
-                    "attempt_id": "original",
+                    "attempt_id": ENROLLMENT_ATTEMPT,
                     "owner_sub": "sandbox-host-owner",
                     "stripe_account_id": "acct_host",
                     "payout_method": "fiat_bank",
@@ -1569,7 +1577,7 @@ def bundle():
                 {
                     "tenant_id": "11111111-1111-1111-1111-111111111111",
                     "host_org_id": "22222222-2222-2222-2222-222222222222",
-                    "attempt_id": "original",
+                    "attempt_id": ENROLLMENT_ATTEMPT,
                     "owner_sub": "sandbox-host-owner",
                     "stripe_account_id": "acct_host",
                     "payout_method": "fiat_bank",
@@ -5255,17 +5263,19 @@ def test_standalone_recovery_cannot_dispatch_without_active_owner_bound_readines
     [
         ("individual", "CA", True),
         ("sole_proprietor", "TX", True),
-        ("company", "CA", False),
-        ("individual", "NY", False),
-        ("individual", "HI", False),
+        ("company", "CA", True),
+        ("individual", "NY", True),
+        ("individual", "HI", True),
         ("individual", "ZZ", False),
     ],
 )
-def test_connect_profiles_follow_current_native_eligibility_until_490_changes_owner_guard(
+def test_connect_profiles_follow_merged_fiat_method_eligibility(
     bundle, legal_type, state, valid
 ):
     row = bundle["gateway_runs"][0]
-    profile = {"legal_type": legal_type, "country": "US", "state": state}
+    profile = dict(
+        row["readiness"]["recipient_profile"], legal_type=legal_type, state=state
+    )
     row["readiness"]["recipient_profile"] = profile
     for stage in ("prepared", "dispatching", "succeeded"):
         row["connect_dispatch"][stage]["state"]["profile"] = profile.copy()
@@ -7933,3 +7943,21 @@ def test_retry_chronology_includes_excluded_intents(bundle, group, mutation):
         assert any("prior journal outcome" in error for error in errors)
     else:
         assert errors
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("payout_method", "usdc"),
+        ("payout_method", None),
+        ("eligibility_rule_version", "unknown"),
+        ("enrollment_attempt_id", "original"),
+        ("enrollment_attempt_id", "00000000-0000-0000-0000-000000000000"),
+    ],
+)
+def test_connect_profile_requires_bound_explicit_fiat_policy(bundle, field, value):
+    row = bundle["gateway_runs"][0]
+    row["readiness"]["recipient_profile"][field] = value
+    for stage in ("prepared", "dispatching", "succeeded"):
+        row["connect_dispatch"][stage]["state"]["profile"][field] = value
+    assert any("immutable attempt/profile" in error for error in check(bundle))
