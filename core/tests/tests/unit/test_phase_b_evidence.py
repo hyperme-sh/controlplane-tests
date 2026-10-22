@@ -2236,7 +2236,7 @@ def test_nonterminal_or_failed_bank_payout_cannot_pass(bundle, status):
         ("bank_status", "errored"),
         ("bank_status", "verification_failed"),
         ("bank_status", "tokenized_account_number_deactivated"),
-        ("bank_status", "verified"),
+        ("bank_status", "validated"),
         ("bank_status", "unknown"),
         ("default_for_currency", False),
         ("currency", "eur"),
@@ -2247,6 +2247,28 @@ def test_nonterminal_or_failed_bank_payout_cannot_pass(bundle, status):
 )
 def test_unready_bank_refuses_even_when_transfer_capability_active(bundle, key, value):
     bundle["gateway_runs"][0]["readiness"][key] = value
+    assert check(bundle)
+
+
+def test_verified_sandbox_bank_preserves_all_other_acceptance_guards(bundle):
+    changed = 0
+
+    def visit(value):
+        nonlocal changed
+        if isinstance(value, dict):
+            if "bank_status" in value:
+                value["bank_status"] = "verified"
+                changed += 1
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(bundle)
+    assert changed > 0
+    assert not check(bundle)
+    bundle["gateway_runs"][0]["readiness"]["payouts_enabled"] = False
     assert check(bundle)
 
 
