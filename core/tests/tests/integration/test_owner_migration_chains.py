@@ -638,6 +638,14 @@ def assert_subject_scope_delta(before, after):
 
 def assert_journal_schema_delta(after):
     assert_control_proof_schema_delta(after)
+    for table in ("connect_access_states", "connect_access_grants", "connect_access_results"):
+        access = after["tables"].pop(table)
+        assert access["rls"] == [True, True]
+        assert all("app.current_tenant_id" in str(policy) for policy in access["policies"])
+        assert {trigger[0] for trigger in access["triggers"]} == ({table + "_delete", table + "_truncate"} | ({table + "_update"} if table != "connect_access_states" else {"connect_access_epoch"}))
+        assert "client_secret" not in {column[0] for column in access["columns"]}
+    for function in ("connect_access_legacy()", "connect_access_epoch()"):
+        assert after["functions"].pop(function)
     assert "usdc_deposit_addresses_hd_index_seq" not in after["sequences"]
     for table in ("connect_recipient_accounts", "payer_mismatch_accounts", "billing_tax_orders", "billing_tax_calculations"):
         assert after["tables"].pop(table)["rls"] == [True, True]
