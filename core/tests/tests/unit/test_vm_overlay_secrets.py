@@ -427,3 +427,14 @@ def test_payout_introspection_credentials_reach_only_auth(path):
     for name in config["services"]:
         if name != "auth-service":
             assert "AUTH_CONNECT_INTROSPECTION_CLIENT_SECRET" not in _service_env(config, name)
+
+
+@pytest.mark.parametrize("path", [REPO_ROOT / "docker-compose.yaml", VM_OVERLAY])
+def test_embedded_runtime_public_configuration_reaches_payment_only(path):
+    config = yaml.load(path.read_text(), Loader=_ComposeLoader)
+    payment = _service_env(config,"payment-service")
+    assert payment["STRIPE_PUBLISHABLE_KEY"] == "${STRIPE_PUBLISHABLE_KEY:-}"
+    assert payment["PAYMENT_CONNECT_EMBEDDED_ENABLED"] == "${PAYMENT_CONNECT_EMBEDDED_ENABLED:-false}"
+    assert payment["PAYMENT_CONNECT_SANDBOX_PLATFORM_ID"] == "${PAYMENT_CONNECT_SANDBOX_PLATFORM_ID:-}"
+    for name in ("controlplane-edge","auth-service"):
+        assert "STRIPE_PUBLISHABLE_KEY" not in _service_env(config,name)
