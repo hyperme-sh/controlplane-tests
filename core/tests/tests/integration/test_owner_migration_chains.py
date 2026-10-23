@@ -638,6 +638,18 @@ def assert_subject_scope_delta(before, after):
 
 def assert_journal_schema_delta(after):
     assert_control_proof_schema_delta(after)
+    bank = after["tables"].pop("connect_bank_approvals")
+    assert bank["rls"] == [True, True]
+    assert {policy[0] for policy in bank["policies"]} == {"bank_approval_select", "bank_approval_insert"}
+    assert all("app.current_tenant_id" in str(policy) for policy in bank["policies"])
+    assert {trigger[0] for trigger in bank["triggers"]} == {
+        "connect_bank_approvals_update", "connect_bank_approvals_delete", "connect_bank_approvals_truncate",
+    }
+    assert {column[0] for column in bank["columns"]} == {
+        "id", "tenant_id", "host_org_id", "enrollment_attempt_id", "account_id", "platform_id",
+        "bank_id", "owner_sub", "member_id", "epoch", "policy_hashes", "bank_observation",
+        "second_factor_at", "approved_at",
+    }
     for table in ("connect_access_states", "connect_access_grants", "connect_access_results"):
         access = after["tables"].pop(table)
         assert access["rls"] == [True, True]
