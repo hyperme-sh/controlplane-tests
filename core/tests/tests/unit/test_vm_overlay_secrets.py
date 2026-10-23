@@ -416,3 +416,14 @@ def test_test_reload_selects_owner_runner_for_every_schema_applicator(overlay):
     base = yaml.load((REPO_ROOT / 'docker-compose.yaml').read_text(), Loader=_ComposeLoader)
     assert base['services']['controlplane-migrate']['command'] == [
         '/app/.venv/bin/python', '-m', 'controlplane_tenancy.startup']
+
+
+@pytest.mark.parametrize("path", [REPO_ROOT / "docker-compose.yaml", VM_OVERLAY])
+def test_payout_introspection_credentials_reach_only_auth(path):
+    config = yaml.load(path.read_text(), Loader=_ComposeLoader)
+    auth = _service_env(config, "auth-service")
+    assert auth["AUTH_CONNECT_INTROSPECTION_CLIENT_ID"] == "${AUTH_CONNECT_INTROSPECTION_CLIENT_ID:-auth-connect-introspection}"
+    assert auth["AUTH_CONNECT_INTROSPECTION_CLIENT_SECRET"] == "${AUTH_CONNECT_INTROSPECTION_CLIENT_SECRET:-}"
+    for name in config["services"]:
+        if name != "auth-service":
+            assert "AUTH_CONNECT_INTROSPECTION_CLIENT_SECRET" not in _service_env(config, name)
