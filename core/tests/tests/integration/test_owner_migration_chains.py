@@ -650,6 +650,11 @@ def assert_journal_schema_delta(after):
         "bank_id", "owner_sub", "member_id", "epoch", "policy_hashes", "bank_observation",
         "second_factor_at", "approved_at",
     }
+    ended = after["tables"].pop("connect_ended_sessions")
+    assert ended["rls"] == [True, True]
+    assert {column[0] for column in ended["columns"]} == {"session_key", "ended_at"}
+    assert {p[0] for p in ended["policies"]} == {"ended_session_select", "ended_session_insert", "ended_session_cleanup"}
+    assert {t[0] for t in ended["triggers"]} == {"connect_ended_sessions_update", "connect_ended_sessions_truncate"}
     for table in ("connect_access_states", "connect_access_grants", "connect_access_results"):
         access = after["tables"].pop(table)
         assert access["rls"] == [True, True]
