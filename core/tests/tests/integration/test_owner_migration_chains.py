@@ -319,6 +319,19 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
 
 
 def assert_cache_migration_delta(before, after):
+    policy = after['tables'].pop('sociacl_witness_policy')
+    assert [(c[0], c[1], c[2]) for c in policy['columns']] == [
+        ('id', 'integer', True), ('revision', 'bigint', True),
+        ('jwks', 'jsonb', True), ('history', 'jsonb', True),
+    ]
+    policy_constraints = {c[0]: c[2] for c in policy['constraints']}
+    assert set(policy_constraints) == {'sociacl_witness_policy_pkey', 'ck_sociacl_policy_singleton', 'ck_sociacl_policy_revision'}
+    assert policy_constraints['sociacl_witness_policy_pkey'] == 'PRIMARY KEY (id)'
+    assert 'id = 1' in policy_constraints['ck_sociacl_policy_singleton']
+    assert '9007199254740991' in policy_constraints['ck_sociacl_policy_revision']
+    assert policy['rls'] == [False, False]
+    assert not policy['policies'] and not policy['triggers'] and not policy['column_grants']
+    assert all(grant[0] == 'OWNER' for grant in policy['grants'])
     state = after['tables'].pop('sociacl_keyring_state')
     assert [(c[0], c[1], c[2]) for c in state['columns']] == [
         ('principal', 'character varying(87)', True),
