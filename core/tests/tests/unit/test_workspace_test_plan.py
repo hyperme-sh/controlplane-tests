@@ -91,3 +91,62 @@ def test_edge_and_hypermesh_select_only_affected_suites():
 def test_host_binding_contract_changes_run_owning_and_consumer_suites(path):
     enabled, selectors = selection(path)
     assert enabled and selectors == []  # All suites include shared owner tests and auth enrollment.
+
+
+def test_shared_matrix_covers_each_runner_suite_once():
+    entries = module.matrix(["shared"])["include"]
+    actual = [suite for entry in entries for suite in entry["suites"].split()]
+    expected = subprocess.check_output(["bash", str(ROOT / "scripts/run_workspace_tests.sh"), "--list"], text=True).splitlines()
+    assert sorted(actual) == sorted(expected)
+    assert len(entries) == 6
+    assert all(entry["suites"] for entry in entries)
+
+
+def test_product_matrix_keeps_exact_selection():
+    assert module.matrix(["frontend"]) == {"include": []}
+    assert module.matrix([]) == {"include": []}
+    assert module.matrix(["turn", "aiuditor"]) == {"include": [
+        {"group": "other-products", "suites": "products/aiuditor products/turn"}]}
+    entries = module.matrix(["hypermesh", "edge"])["include"]
+    assert {e["group"] for e in entries} == {"hypermesh", "other-products"}
+    assert next(e for e in entries if e["group"] == "other-products")["suites"] == "controlplane-edge"
+
+
+def test_unassigned_suite_fails_closed(monkeypatch):
+    monkeypatch.setattr(module, "GROUPS", {})
+    with pytest.raises(ValueError):
+        module.matrix(["shared"])
+
+
+def test_duplicate_suite_fails_closed(monkeypatch):
+    monkeypatch.setattr(module, "GROUPS", {**module.GROUPS, "duplicate": ["core/tests"]})
+    with pytest.raises(ValueError):
+        module.matrix(["shared"])
+
+
+@pytest.mark.parametrize("changes,enabled,result,accepted", [
+    ("success", "true", "success", True), ("success", "false", "skipped", True),
+    ("success", "true", "failure", False), ("success", "true", "cancelled", False),
+    ("success", "true", "skipped", False), ("failure", "false", "skipped", False),
+    ("cancelled", "true", "success", False), ("success", "", "skipped", False),
+])
+def test_aggregate_gate_fails_closed(changes, enabled, result, accepted):
+    import os
+    job = workflow["jobs"]["workspace"]
+    assert job["name"] == "Workspace pytest"
+    assert job["if"] == "${{ always() }}"
+    assert job["needs"] == ["changes", "workspace-suite"]
+    command = job["steps"][0]["run"]
+    ran = subprocess.run(["bash", "-c", command], env={**os.environ,
+        "CHANGES_RESULT": changes, "WORKSPACE_ENABLED": enabled, "SUITE_RESULT": result})
+    assert (ran.returncode == 0) == accepted
+
+
+def test_matrix_keeps_failures_independent_and_limits_host_load():
+    job = workflow["jobs"]["workspace-suite"]
+    assert job["strategy"]["fail-fast"] is False
+    assert job["strategy"]["max-parallel"] == 2
+    assert job["timeout-minutes"] == 30
+    assert job["strategy"]["matrix"] == "${{ fromJSON(needs.changes.outputs.matrix) }}"
+    cache = next(step["with"]["cache-local-path"] for step in job["steps"] if "cache-local-path" in step.get("with", {}))
+    assert "matrix.group" in cache
