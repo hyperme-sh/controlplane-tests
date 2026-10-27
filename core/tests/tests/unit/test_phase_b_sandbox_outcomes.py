@@ -62,6 +62,7 @@ def outcome():
         followup,
         {
             "payout_id": "po_test",
+            "created_at": datetime.fromtimestamp(1700000000, UTC).isoformat(),
             "amount_cents": 100,
             "source_type": "card",
             "metadata": deepcopy(native["metadata"]),
@@ -164,4 +165,22 @@ def test_native_followup_must_preserve_every_frozen_financial_metadata_field(
     # Even consistently altered event copies cannot restore the payout-plan binding.
     for event in outcome[0]["payout_events"]:
         event["data"]["object"]["metadata"] = deepcopy(metadata)
+    assert check(outcome)
+
+
+@pytest.mark.parametrize("created", [0, 1, 1699999999, 1700000001])
+def test_native_creation_and_consistent_shifted_events_cannot_replace_original_payout_time(
+    outcome, created
+):
+    native = outcome[0]["native_payout"]
+    native["created"] = created
+    for index, event in enumerate(outcome[0]["payout_events"]):
+        event["created"] = created + index
+        event["data"]["object"]["created"] = created
+    assert check(outcome)
+
+
+@pytest.mark.parametrize("original", [None, "invalid", "2023-11-14T22:13:20"])
+def test_missing_or_unzoned_original_payout_creation_cannot_pass(outcome, original):
+    outcome[1]["created_at"] = original
     assert check(outcome)

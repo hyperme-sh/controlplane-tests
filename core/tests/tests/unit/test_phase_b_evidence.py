@@ -8066,3 +8066,14 @@ def test_native_sandbox_followup_cannot_predate_retained_paid_opening(bundle):
     assert any(
         "cannot predate the original paid observation" in e for e in check(bundle)
     )
+
+
+def test_complete_bundle_refuses_native_events_shifted_outside_original_scan_window(
+    bundle,
+):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    followup["native_payout"]["created"] = 0
+    for index, event in enumerate(followup["payout_events"]):
+        event["created"] = index
+        event["data"]["object"]["created"] = 0
+    assert any("matching native paid payout" in e for e in check(bundle))
