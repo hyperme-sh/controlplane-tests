@@ -7983,3 +7983,77 @@ def test_connect_profile_requires_bound_explicit_fiat_policy(bundle, field, valu
     for stage in ("prepared", "dispatching", "succeeded"):
         row["connect_dispatch"][stage]["state"]["profile"][field] = value
     assert any("immutable attempt/profile" in error for error in check(bundle))
+
+
+def use_native_sandbox_followup(run):
+    payout = run["bank_payout"]
+    created = int(datetime.fromisoformat(payout["created_at"]).timestamp())
+    checked = datetime.fromisoformat(payout["recorded_at"]) + timedelta(seconds=1)
+    native = {
+        "id": payout["payout_id"],
+        "object": "payout",
+        "livemode": False,
+        "amount": payout["amount_cents"],
+        "currency": "usd",
+        "destination": payout["bank_id"],
+        "status": "paid",
+        "automatic": False,
+        "method": "standard",
+        "type": "bank_account",
+        "source_type": payout["source_type"],
+        "created": created,
+        "metadata": {
+            key: run[key]
+            for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
+        },
+    }
+    followup = run["bank_followup"]
+    followup.update(
+        outcome_policy="stripe-sandbox-native/v1",
+        native_payout=native,
+        recorded_at=checked.isoformat(),
+        events_through_at=checked.isoformat(),
+        additional_bank_closures_accounted_for=False,
+        observation_window_complete=True,
+        operator_reconciliation_required=False,
+        returned_funds=None,
+        payout_events=[
+            {
+                "id": "evt_" + status,
+                "object": "event",
+                "livemode": False,
+                "account": payout["account_id"],
+                "created": created + index,
+                "type": "payout." + status,
+                "data": {
+                    "object": deepcopy(native)
+                    | {"status": "pending" if status == "created" else "paid"}
+                },
+            }
+            for index, status in enumerate(("created", "paid"))
+        ],
+    )
+    return followup
+
+
+def test_complete_bundle_accepts_native_sandbox_outcomes_without_live_wait(bundle):
+    for run in bundle["gateway_runs"] + bundle["stripe_runs"]:
+        use_native_sandbox_followup(run)
+    assert check(bundle) == []
+    # An omitted or live policy still requires the original real banking window.
+    del bundle["gateway_runs"][0]["bank_followup"]["outcome_policy"]
+    assert any("five banking days" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("change", ["live", "source", "missing", "unknown"])
+def test_complete_bundle_refuses_incomplete_or_mixed_sandbox_outcomes(bundle, change):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    if change == "live":
+        followup["native_payout"]["livemode"] = True
+    elif change == "source":
+        followup["native_payout"]["source_type"] = "foreign"
+    elif change == "missing":
+        followup["payout_events"] = []
+    else:
+        followup["outcome_policy"] = "short-live-window"
+    assert check(bundle)
