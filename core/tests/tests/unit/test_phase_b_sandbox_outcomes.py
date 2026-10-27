@@ -30,7 +30,11 @@ def outcome():
         "type": "bank_account",
         "source_type": "card",
         "created": 1700000000,
-        "metadata": scope,
+        "metadata": scope
+        | {
+            k: "bound_" + k
+            for k in ("plan_id", "operation_id", "transfer_id", "charge_id")
+        },
     }
     events = [
         {
@@ -56,7 +60,12 @@ def outcome():
     }
     return (
         followup,
-        {"payout_id": "po_test", "amount_cents": 100, "source_type": "card"},
+        {
+            "payout_id": "po_test",
+            "amount_cents": 100,
+            "source_type": "card",
+            "metadata": deepcopy(native["metadata"]),
+        },
         scope,
     )
 
@@ -139,4 +148,20 @@ def test_missing_mixed_live_failed_or_foreign_native_facts_never_pass(outcome, c
         row["payout_events"][1]["created"] = 1700000011
     elif change == "paid_status":
         row["payout_events"][1]["data"]["object"]["status"] = "pending"
+    assert check(outcome)
+
+
+@pytest.mark.parametrize("key", ["plan_id", "operation_id", "transfer_id", "charge_id"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_native_followup_must_preserve_every_frozen_financial_metadata_field(
+    outcome, key, missing
+):
+    metadata = outcome[0]["native_payout"]["metadata"]
+    if missing:
+        del metadata[key]
+    else:
+        metadata[key] = "foreign"
+    # Even consistently altered event copies cannot restore the payout-plan binding.
+    for event in outcome[0]["payout_events"]:
+        event["data"]["object"]["metadata"] = deepcopy(metadata)
     assert check(outcome)

@@ -8002,10 +8002,7 @@ def use_native_sandbox_followup(run):
         "type": "bank_account",
         "source_type": payout["source_type"],
         "created": created,
-        "metadata": {
-            key: run[key]
-            for key in ("tenant_id", "host_org_id", "lease_id", "billing_record_id")
-        },
+        "metadata": deepcopy(payout["metadata"]),
     }
     followup = run["bank_followup"]
     followup.update(
@@ -8057,3 +8054,15 @@ def test_complete_bundle_refuses_incomplete_or_mixed_sandbox_outcomes(bundle, ch
     else:
         followup["outcome_policy"] = "short-live-window"
     assert check(bundle)
+
+
+def test_native_sandbox_followup_cannot_predate_retained_paid_opening(bundle):
+    run = bundle["gateway_runs"][0]
+    followup = use_native_sandbox_followup(run)
+    early = datetime.fromisoformat(run["bank_payout"]["recorded_at"]) - timedelta(
+        seconds=1
+    )
+    followup["recorded_at"] = followup["events_through_at"] = early.isoformat()
+    assert any(
+        "cannot predate the original paid observation" in e for e in check(bundle)
+    )
