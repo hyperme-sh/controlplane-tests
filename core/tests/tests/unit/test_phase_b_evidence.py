@@ -7983,3 +7983,109 @@ def test_connect_profile_requires_bound_explicit_fiat_policy(bundle, field, valu
     for stage in ("prepared", "dispatching", "succeeded"):
         row["connect_dispatch"][stage]["state"]["profile"][field] = value
     assert any("immutable attempt/profile" in error for error in check(bundle))
+
+
+def use_native_sandbox_followup(run):
+    payout = run["bank_payout"]
+    created = int(datetime.fromisoformat(payout["created_at"]).timestamp())
+    checked = datetime.fromisoformat(payout["recorded_at"]) + timedelta(seconds=1)
+    native = {
+        "id": payout["payout_id"],
+        "balance_transaction": payout["balance_transaction"],
+        "object": "payout",
+        "livemode": False,
+        "amount": payout["amount_cents"],
+        "currency": "usd",
+        "destination": payout["bank_id"],
+        "status": "paid",
+        "automatic": False,
+        "method": "standard",
+        "type": "bank_account",
+        "source_type": payout["source_type"],
+        "created": created,
+        "metadata": deepcopy(payout["metadata"]),
+    }
+    followup = run["bank_followup"]
+    followup.update(
+        outcome_policy="stripe-sandbox-native/v1",
+        native_payout=native,
+        recorded_at=checked.isoformat(),
+        events_through_at=checked.isoformat(),
+        additional_bank_closures_accounted_for=False,
+        observation_window_complete=True,
+        operator_reconciliation_required=False,
+        returned_funds=None,
+        payout_events=[
+            {
+                "id": "evt_" + status,
+                "object": "event",
+                "livemode": False,
+                "account": payout["account_id"],
+                "created": created + index,
+                "type": "payout." + status,
+                "data": {
+                    "object": deepcopy(native)
+                    | {"status": "pending" if status == "created" else "paid"}
+                },
+            }
+            for index, status in enumerate(("created", "paid"))
+        ],
+    )
+    return followup
+
+
+def test_complete_bundle_accepts_native_sandbox_outcomes_without_live_wait(bundle):
+    for run in bundle["gateway_runs"] + bundle["stripe_runs"]:
+        use_native_sandbox_followup(run)
+    assert check(bundle) == []
+    # An omitted or live policy still requires the original real banking window.
+    del bundle["gateway_runs"][0]["bank_followup"]["outcome_policy"]
+    assert any("five banking days" in error for error in check(bundle))
+
+
+@pytest.mark.parametrize("change", ["live", "source", "missing", "unknown"])
+def test_complete_bundle_refuses_incomplete_or_mixed_sandbox_outcomes(bundle, change):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    if change == "live":
+        followup["native_payout"]["livemode"] = True
+    elif change == "source":
+        followup["native_payout"]["source_type"] = "foreign"
+    elif change == "missing":
+        followup["payout_events"] = []
+    else:
+        followup["outcome_policy"] = "short-live-window"
+    assert check(bundle)
+
+
+def test_native_sandbox_followup_cannot_predate_retained_paid_opening(bundle):
+    run = bundle["gateway_runs"][0]
+    followup = use_native_sandbox_followup(run)
+    early = datetime.fromisoformat(run["bank_payout"]["recorded_at"]) - timedelta(
+        seconds=1
+    )
+    followup["recorded_at"] = followup["events_through_at"] = early.isoformat()
+    assert any(
+        "cannot predate the original paid observation" in e for e in check(bundle)
+    )
+
+
+def test_complete_bundle_refuses_native_events_shifted_outside_original_scan_window(
+    bundle,
+):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    followup["native_payout"]["created"] = 0
+    for index, event in enumerate(followup["payout_events"]):
+        event["created"] = index
+        event["data"]["object"]["created"] = 0
+    assert any("matching native paid payout" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("change", ["native", "events", "both"])
+def test_complete_sandbox_bundle_preserves_original_payout_debit(bundle, change):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    if change in ("native", "both"):
+        followup["native_payout"]["balance_transaction"] = "txn_other"
+    if change in ("events", "both"):
+        for event in followup["payout_events"]:
+            event["data"]["object"]["balance_transaction"] = "txn_other"
+    assert any("matching native paid payout" in e for e in check(bundle))
