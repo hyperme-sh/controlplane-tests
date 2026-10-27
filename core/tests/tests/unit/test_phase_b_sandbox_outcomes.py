@@ -21,6 +21,7 @@ def outcome():
         "id": "po_test",
         "object": "payout",
         "livemode": False,
+        "balance_transaction": "txn_original",
         "amount": 100,
         "currency": "usd",
         "destination": "ba_test",
@@ -62,6 +63,7 @@ def outcome():
         followup,
         {
             "payout_id": "po_test",
+            "balance_transaction": "txn_original",
             "created_at": datetime.fromtimestamp(1700000000, UTC).isoformat(),
             "amount_cents": 100,
             "source_type": "card",
@@ -184,3 +186,27 @@ def test_native_creation_and_consistent_shifted_events_cannot_replace_original_p
 def test_missing_or_unzoned_original_payout_creation_cannot_pass(outcome, original):
     outcome[1]["created_at"] = original
     assert check(outcome)
+
+
+@pytest.mark.parametrize("debit", [None, "txn_other"])
+def test_native_followup_preserves_original_debit_even_with_matching_events(
+    outcome, debit
+):
+    row = outcome[0]
+    row["native_payout"]["balance_transaction"] = debit
+    for event in row["payout_events"]:
+        event["data"]["object"]["balance_transaction"] = debit
+    assert check(outcome)
+
+
+@pytest.mark.parametrize("event_index", [0, 1])
+def test_each_native_event_rejects_another_payout_debit(outcome, event_index):
+    outcome[0]["payout_events"][event_index]["data"]["object"][
+        "balance_transaction"
+    ] = "txn_other"
+    assert check(outcome)
+
+
+def test_early_native_event_can_omit_original_debit(outcome):
+    outcome[0]["payout_events"][0]["data"]["object"]["balance_transaction"] = None
+    assert check(outcome) == []

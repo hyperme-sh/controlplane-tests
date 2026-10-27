@@ -7991,6 +7991,7 @@ def use_native_sandbox_followup(run):
     checked = datetime.fromisoformat(payout["recorded_at"]) + timedelta(seconds=1)
     native = {
         "id": payout["payout_id"],
+        "balance_transaction": payout["balance_transaction"],
         "object": "payout",
         "livemode": False,
         "amount": payout["amount_cents"],
@@ -8076,4 +8077,15 @@ def test_complete_bundle_refuses_native_events_shifted_outside_original_scan_win
     for index, event in enumerate(followup["payout_events"]):
         event["created"] = index
         event["data"]["object"]["created"] = 0
+    assert any("matching native paid payout" in e for e in check(bundle))
+
+
+@pytest.mark.parametrize("change", ["native", "events", "both"])
+def test_complete_sandbox_bundle_preserves_original_payout_debit(bundle, change):
+    followup = use_native_sandbox_followup(bundle["gateway_runs"][0])
+    if change in ("native", "both"):
+        followup["native_payout"]["balance_transaction"] = "txn_other"
+    if change in ("events", "both"):
+        for event in followup["payout_events"]:
+            event["data"]["object"]["balance_transaction"] = "txn_other"
     assert any("matching native paid payout" in e for e in check(bundle))
