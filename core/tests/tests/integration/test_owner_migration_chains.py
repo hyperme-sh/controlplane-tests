@@ -319,6 +319,28 @@ def test_startup_provisions_configured_marketplace_after_migrations(databases, m
 
 
 def assert_cache_migration_delta(before, after):
+    state = after['tables'].pop('sociacl_keyring_state')
+    assert [(c[0], c[1], c[2]) for c in state['columns']] == [
+        ('principal', 'character varying(87)', True),
+        ('head_floor', 'bigint', True),
+        ('recovery_generation', 'bigint', True),
+        ('wrap_generation', 'bigint', True),
+        ('recovery', 'bytea', True),
+        ('wraps', 'bytea', True),
+    ]
+    constraints = {c[0]: c[2] for c in state['constraints']}
+    assert set(constraints) == {
+        'sociacl_keyring_state_pkey', 'ck_sociacl_keyring_principal',
+        'ck_sociacl_keyring_floor', 'ck_sociacl_recovery_generation',
+        'ck_sociacl_wrap_generation',
+    }
+    assert constraints['sociacl_keyring_state_pkey'] == 'PRIMARY KEY (principal)'
+    assert '{43}' in constraints['ck_sociacl_keyring_principal']
+    for name in ['ck_sociacl_keyring_floor', 'ck_sociacl_recovery_generation', 'ck_sociacl_wrap_generation']:
+        assert '9007199254740991' in constraints[name] and '>= 0' in constraints[name]
+    assert state['rls'] == [False, False]  # Global principal state, no tenant access.
+    assert not state['policies'] and not state['triggers'] and not state['column_grants']
+    assert all(grant[0] == 'OWNER' for grant in state['grants'])
     import copy
     expected = copy.deepcopy(before)
     health = expected['tables']['hypermesh_device_health']
