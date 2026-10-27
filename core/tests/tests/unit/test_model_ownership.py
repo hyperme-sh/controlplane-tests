@@ -18,7 +18,7 @@ def test_platform_import_has_no_product_models_or_imports():
     run("""
 import sys
 from controlplane_db import models
-assert len(models.Base.metadata.tables) == 33
+assert len(models.Base.metadata.tables) == 34
 assert not any(name.startswith(('Hypermesh', 'Aiuditor', 'Operator')) for name in vars(models))
 assert not hasattr(models, 'HostOrganizationBinding')
 assert not any(name.startswith(('hypermesh_service', 'aiuditor_service', 'user_service')) for name in sys.modules)
@@ -31,7 +31,7 @@ import sys
 from controlplane_db.alembic.legacy_models import Base as MigrationBase
 from controlplane_db.models import Base
 assert len(MigrationBase.metadata.tables) == 77
-assert len(Base.metadata.tables) == 33
+assert len(Base.metadata.tables) == 34
 assert MigrationBase.metadata is not Base.metadata
 assert not any(name.startswith(('hypermesh_service', 'aiuditor_service', 'user_service')) for name in sys.modules)
 """)

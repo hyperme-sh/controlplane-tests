@@ -55,7 +55,7 @@ def test_new_revision_in_wrong_owner_chain_fails(tmp_path):
     shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
     path = tmp_path/checker.DB/'migration_chains/platform/versions/0054_planted.py'
     path.write_text('''revision = "platform_0099_planted"
-down_revision = "platform_0054_subject_scope"
+down_revision = "platform_0055_sociacl_keyring"
 def upgrade():
     op.add_column("hypermesh_leases", column)
 ''')
@@ -74,7 +74,7 @@ def test_owner_revision_must_use_the_chain_id_format(tmp_path, revision):
     shutil.copyfile(ROOT/'scripts/ownership.json', tmp_path/'scripts/ownership.json')
     path = tmp_path/checker.DB/'migration_chains/platform/versions/0099_planted.py'
     path.write_text(f'''revision = "{revision}"
-down_revision = "platform_0054_subject_scope"
+down_revision = "platform_0055_sociacl_keyring"
 def upgrade():
     pass
 ''')
@@ -126,7 +126,7 @@ def test_drop_operations_cannot_cross_owner_chains(tmp_path, operation):
     )
     path = tmp_path / checker.DB / "migration_chains/platform/versions/0054_planted.py"
     source = (
-        'revision = "platform_0099_planted"\ndown_revision = "platform_0054_subject_scope"\ndef upgrade():\n    '
+        'revision = "platform_0099_planted"\ndown_revision = "platform_0055_sociacl_keyring"\ndef upgrade():\n    '
         + operation
         + "\n"
     )
