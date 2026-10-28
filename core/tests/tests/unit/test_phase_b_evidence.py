@@ -8310,3 +8310,120 @@ def test_signed_stable_event_preview_omission_is_narrow_and_raw(bundle, change):
         assert event["data"]["object"]["payment_method_options"]["crypto"] == {}
     else:
         assert any("provider succeeded event" in error for error in errors)
+
+
+def bind_prorated_source(row):
+    refund = row["refund"]
+    transfer_at = datetime.fromisoformat(row["connect_transfer"]["created_at"])
+    refund["created_at"] = (transfer_at - timedelta(seconds=30)).isoformat()
+    refund["recorded_at"] = (transfer_at - timedelta(seconds=27)).isoformat()
+    refund["inventory"]["data"][0]["created_at"] = refund["created_at"]
+    refund["transfer_outcome"].update(
+        kind="not_required",
+        transfer_id=row["connect_transfer"]["id"],
+        reversal_due_cents=0,
+        reversed_cents=0,
+        platform_loss_cents=0,
+        reversal_id=None,
+        provider_reversal=None,
+        reversal_inventory=None,
+        balance_transaction=None,
+        recorded_at=(transfer_at + timedelta(seconds=14)).isoformat(),
+    )
+    row["settlement"].update(
+        post_refund_host_payable_cents=100,
+        post_refund_platform_compute_cents=200,
+        reversal_due_cents=0,
+    )
+    bind_money_dispatch(row)
+    sync_bank_to_outcome(row)
+    bind_source_type(row, row["bank_payout"])
+    checked = row["connect_dispatch"]["source_recheck"]
+    checked["charge"]["amount_refunded"] = 100
+    checkpoint = refund["dispatch_checkpoint"]
+    proof = {
+        k: refund[k]
+        for k in (
+            "tenant_id",
+            "host_org_id",
+            "lease_id",
+            "billing_record_id",
+            "refund_id",
+            "charge_id",
+            "payment_intent_id",
+            "amount_cents",
+            "recorded_at",
+        )
+    }
+    proof.update(
+        owner_checkpoint_at=checkpoint["recorded_at"],
+        provider_request_id=checkpoint["provider_request"]["request_id"],
+    )
+    checked["proration_refund"] = proof
+    return row
+
+
+@pytest.mark.parametrize("group", ["stripe_runs", "gateway_runs"])
+def test_accounted_proration_can_precede_original_transfer(bundle, group):
+    if group == "gateway_runs":
+        bundle[group][0] = record("stripe-prorated-gateway", 2)
+    row = bind_prorated_source(bundle[group][0])
+    assert check(bundle) == []
+    assert (
+        row["refund"]["transfer_outcome"]["transfer_id"]
+        == row["connect_transfer"]["id"]
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_refund",
+        "missing_proof",
+        "wrong_scope",
+        "wrong_amount",
+        "wrong_request",
+        "late_refund",
+        "unknown_status",
+        "extra_refund",
+        "wrong_plan",
+        "boolean_amount",
+        "contradictory_outcome",
+    ],
+)
+def test_prior_proration_requires_complete_original_refund_journey(bundle, change):
+    row = bind_prorated_source(bundle["stripe_runs"][0])
+    refund = row["refund"]
+    proof = row["connect_dispatch"]["source_recheck"]["proration_refund"]
+    if change == "missing_refund":
+        row.pop("refund")
+    elif change == "missing_proof":
+        row["connect_dispatch"]["source_recheck"].pop("proration_refund")
+    elif change == "wrong_scope":
+        proof["tenant_id"] = str(uuid5(NAMESPACE_URL, "foreign"))
+    elif change == "wrong_amount":
+        proof["amount_cents"] += 1
+    elif change == "wrong_request":
+        proof["provider_request_id"] = "req_unrelated"
+    elif change == "late_refund":
+        refund["recorded_at"] = row["recorded_at"]
+        proof["recorded_at"] = row["recorded_at"]
+    elif change == "unknown_status":
+        refund["status"] = "pending"
+    elif change == "extra_refund":
+        refund["inventory"]["data"].append(
+            deepcopy(refund["inventory"]["data"][0]) | {"id": "re_unaccounted"}
+        )
+    elif change == "wrong_plan":
+        refund["dispatch_plan"]["amount_cents"] += 1
+    elif change == "boolean_amount":
+        proof["amount_cents"] = True
+    elif change == "contradictory_outcome":
+        refund["transfer_outcome"]["platform_loss_cents"] = 1
+    assert check(bundle)
+
+
+@pytest.mark.parametrize("group", ["failed_bank_payout", "refund_recovery"])
+def test_prior_proration_does_not_relax_special_exercise_source_guards(bundle, group):
+    bundle[group] = deepcopy(bind_prorated_source(bundle["stripe_runs"][0]))
+    assert any("source-charge recheck" in error for error in check(bundle))
