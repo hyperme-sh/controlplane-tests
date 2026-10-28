@@ -8089,3 +8089,195 @@ def test_complete_sandbox_bundle_preserves_original_payout_debit(bundle, change)
         for event in followup["payout_events"]:
             event["data"]["object"]["balance_transaction"] = "txn_other"
     assert any("matching native paid payout" in e for e in check(bundle))
+
+
+@pytest.fixture(
+    params=["gateway_runs", "stripe_runs", "failed_bank_payout", "refund_recovery"]
+)
+def shared_funding_bundle(bundle, request):
+    """Retain complete native account history alongside exact own funding rows."""
+    funding = financial_row(bundle, request.param)["bank_funding"]
+    opening, closing = funding["opening_balance"], funding["closing_balance"]
+    start, end = (datetime.fromisoformat(b["recorded_at"]) for b in (opening, closing))
+    baseline = {
+        "id": "txn_baseline",
+        "object": "balance_transaction",
+        "source": "py_baseline",
+        "type": "payment",
+        "currency": "usd",
+        "amount": 61,
+        "fee": 0,
+        "net": 61,
+        "status": "pending",
+        "created": int(start.timestamp()) - 100,
+        "available_on": int(start.timestamp()) + 1,
+    }
+    own = funding["transactions"]
+    for row in own:
+        row.setdefault("available_at", row["created_at"])
+        row.update(
+            object="balance_transaction",
+            created=int(datetime.fromisoformat(row["created_at"]).timestamp()),
+            available_on=int(datetime.fromisoformat(row["available_at"]).timestamp()),
+        )
+    foreign = dict(
+        baseline,
+        id="txn_foreign",
+        source="py_foreign",
+        amount=7,
+        net=7,
+        created=int(end.timestamp()) - 3,
+        available_on=int(end.timestamp()) + 86400,
+    )
+
+    def sample_at(name, observed, rows, available, pending):
+        raw = {
+            "object": "balance",
+            "livemode": False,
+            "available": [
+                {
+                    "currency": "usd",
+                    "amount": available,
+                    "source_types": {"card": available},
+                }
+            ],
+            "pending": [
+                {
+                    "currency": "usd",
+                    "amount": pending,
+                    "source_types": {"card": pending},
+                }
+            ],
+        }
+        reads = []
+        for i, (path, params, response) in enumerate(
+            [
+                ("/v1/balance", {}, raw),
+                (
+                    "/v1/balance_transactions",
+                    {"limit": 100},
+                    {"object": "list", "has_more": False, "data": rows},
+                ),
+                (
+                    "/v1/balance_transactions",
+                    {"limit": 100},
+                    {"object": "list", "has_more": False, "data": rows},
+                ),
+                ("/v1/balance", {}, raw),
+            ]
+        ):
+            reads.append(
+                {
+                    "method": "GET",
+                    "path": path,
+                    "parameters": params,
+                    "request_id": f"req_{name}{i}",
+                    "account_id": "acct_host",
+                    "observed_at": (observed - timedelta(seconds=3 - i)).isoformat(),
+                    "response": deepcopy(response),
+                }
+            )
+        return {"native_reads": reads}
+
+    funding.update(
+        reconciliation_policy="complete_native_v1",
+        native_reconciliation={
+            "opening": sample_at("opening", start, [baseline], 0, 61),
+            "closing": sample_at(
+                "closing",
+                end,
+                [dict(baseline, status="available"), foreign, *own],
+                61 + sum(r["net"] for r in own),
+                7,
+            ),
+        },
+    )
+    for b, available, pending in (
+        (opening, 0, 61),
+        (closing, 61 + sum(r["net"] for r in own), 7),
+    ):
+        b.update(
+            available_cents=available,
+            pending_cents=pending,
+            available_source_types={"card": available},
+            pending_source_types={"card": pending},
+        )
+    return bundle, funding
+
+
+def test_complete_shared_native_funding_passes_full_gate(shared_funding_bundle):
+    bundle, _ = shared_funding_bundle
+    assert check(bundle) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_own",
+        "missing_old",
+        "new_old",
+        "changed_old",
+        "regressed",
+        "extra_source",
+        "duplicate",
+        "incomplete",
+        "filtered",
+        "reused_receipt",
+        "racing_balance",
+        "racing_ledger",
+        "wrong_projection",
+        "unknown_policy",
+    ],
+)
+def test_complete_shared_native_funding_rejects_corruption(
+    shared_funding_bundle, mutation
+):
+    bundle, funding = shared_funding_bundle
+    proof = funding["native_reconciliation"]
+    reads = proof["closing"]["native_reads"]
+    if mutation == "missing_own":
+        for read in reads[1:3]:
+            read["response"]["data"] = [
+                r
+                for r in read["response"]["data"]
+                if r["id"] != funding["transactions"][0]["id"]
+            ]
+    elif mutation == "missing_old":
+        for read in reads[1:3]:
+            read["response"]["data"] = [
+                r for r in read["response"]["data"] if r["id"] != "txn_baseline"
+            ]
+    elif mutation in {
+        "changed_old",
+        "new_old",
+        "regressed",
+        "extra_source",
+        "duplicate",
+    }:
+        for read in reads[1:3]:
+            rows = read["response"]["data"]
+            if mutation == "changed_old":
+                rows[0]["available_on"] += 1
+            elif mutation == "new_old":
+                rows[1]["created"] = rows[0]["created"]
+            elif mutation == "regressed":
+                rows[0]["status"] = "pending"
+            elif mutation == "extra_source":
+                rows[1]["source"] = funding["transactions"][0]["source"]
+            else:
+                rows.append(deepcopy(rows[-1]))
+    elif mutation == "incomplete":
+        reads[2]["response"]["has_more"] = True
+    elif mutation == "filtered":
+        reads[1]["parameters"]["created"] = {"gte": 1}
+    elif mutation == "reused_receipt":
+        reads[1]["request_id"] = reads[0]["request_id"]
+    elif mutation == "racing_balance":
+        reads[-1]["response"]["available"][0]["amount"] += 1
+    elif mutation == "racing_ledger":
+        reads[2]["response"]["data"][0]["status"] = "pending"
+    elif mutation == "wrong_projection":
+        funding["closing_balance"]["available_cents"] = 0
+    else:
+        funding["reconciliation_policy"] = "accept_any_balance"
+    assert check(bundle)
