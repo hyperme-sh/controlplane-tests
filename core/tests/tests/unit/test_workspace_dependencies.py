@@ -1175,9 +1175,11 @@ def test_flow_build_paths_ignore_nested_build_options():
 def test_config_setting_does_not_change_project_directory(tmp_path):
     root = workspace(tmp_path)
     packages = checker.load_workspace(root)
+    path = root / 'pyproject.toml'
+    path.write_text(package('root-project', ['extra-lib']) + path.read_text())
     groups = checker.unlocked_groups('uv run -C key=value python')
     assert checker._project_seeds(root, packages, 'uv run -C key=value python',
-                                  '/app/svc', groups, {'svc'}) == {'svc-service'}
+                                  '/app', groups, {'pyproject.toml'}) == {'extra-lib'}
 
 
 def test_group_only_omits_project_but_keeps_group_dependency_closure():
