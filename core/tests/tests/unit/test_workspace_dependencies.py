@@ -1170,3 +1170,56 @@ def test_json_copy_destination_with_flags(tmp_path):
 def test_flow_build_paths_ignore_nested_build_options():
     block = '  worker:\n    build: {context: "..", args: {A: x, B: y}, cache_from: [one, two], dockerfile: "svc/Dockerfile"}'
     assert checker.resolved_dockerfile(block, 'deploy') == 'svc/Dockerfile'
+
+
+def test_config_setting_does_not_change_project_directory(tmp_path):
+    root = workspace(tmp_path)
+    packages = checker.load_workspace(root)
+    path = root / 'pyproject.toml'
+    path.write_text(package('root-project', ['extra-lib']) + path.read_text())
+    groups = checker.unlocked_groups('uv run -C key=value python')
+    assert checker._project_seeds(root, packages, 'uv run -C key=value python',
+                                  '/app', groups, {'pyproject.toml'}) == {'extra-lib'}
+
+
+def test_group_only_omits_project_but_keeps_group_dependency_closure():
+    packages = {
+        'svc': checker.Package('svc', 'svc', ['project-dep'],
+                               dependency_groups={'dev': ['tool']}),
+        'project-dep': checker.Package('project-dep', 'prod', []),
+        'tool': checker.Package('tool', 'tool', ['tool-dep']),
+        'tool-dep': checker.Package('tool-dep', 'dep', []),
+    }
+    for options in ('--only-dev', '--only-group dev'):
+        groups = checker.unlocked_groups(f'uv run {options} python')
+        assert checker.close_all(packages, ['svc'], groups) == {'tool', 'tool-dep'}
+
+
+def test_compose_services_header_allows_inline_comment(tmp_path):
+    root = workspace(tmp_path)
+    _worker_compose(root, ['    command: [uv, run, --all-packages, python]'])
+    path = root / 'docker-compose.yaml'
+    path.write_text(path.read_text().replace('services:', 'services: # application services'))
+    assert any('extra-lib' in error for error in checker.violations(root))
+
+
+def test_dependency_group_names_are_normalized(tmp_path):
+    root = workspace(tmp_path)
+    write(root, 'svc/pyproject.toml', package('svc-service', ['models-lib']) +
+          '\n[dependency-groups]\nqa_tools = ["extra-lib"]\nchecks = [{include-group = "qa-tools"}]\n'
+          '[tool.uv]\ndefault-groups = ["qa.tools"]\n')
+    for options in ('', '--group qa-tools', '--group checks', '--only-group QA_tools'):
+        _worker_compose(root, [f'    command: uv run {options} python'])
+        assert any('extra-lib' in error for error in checker.violations(root))
+    _worker_compose(root, ['    command: uv run --all-groups --no-group qa.tools --no-group checks python'])
+    assert checker.violations(root) == []
+
+
+def test_group_only_seed_can_also_be_a_transitive_project_dependency():
+    packages = {
+        'svc': checker.Package('svc', 'svc', ['project-dep'], dependency_groups={'dev': ['tool']}),
+        'tool': checker.Package('tool', 'tool', ['svc']),
+        'project-dep': checker.Package('project-dep', 'dep', []),
+    }
+    groups = checker.unlocked_groups('uv run --only-dev python')
+    assert checker.close_all(packages, ['svc', 'tool'], groups) == {'svc', 'tool', 'project-dep'}
