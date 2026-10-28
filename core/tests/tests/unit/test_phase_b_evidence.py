@@ -8281,3 +8281,32 @@ def test_complete_shared_native_funding_rejects_corruption(
     else:
         funding["reconciliation_policy"] = "accept_any_balance"
     assert check(bundle)
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["observed_omission", "conflicting_mode", "unknown_version", "other_options"],
+)
+def test_signed_stable_event_preview_omission_is_narrow_and_raw(bundle, change):
+    payment = bundle["gateway_runs"][0]["payment"]
+    payment["intent"]["payment_method_options"]["crypto"] = {
+        "mode": "deposit",
+        "deposit_options": {"networks": ["base"]},
+    }
+    event = payment["capture_event"]
+    event["api_version"] = "2026-08-26.dahlia"
+    event["data"]["object"]["payment_method_options"]["crypto"] = {}
+    if change == "conflicting_mode":
+        event["data"]["object"]["payment_method_options"]["crypto"]["mode"] = "payment"
+    elif change == "unknown_version":
+        event.pop("api_version")
+    elif change == "other_options":
+        event["data"]["object"]["payment_method_options"]["card"] = {
+            "request_three_d_secure": "any"
+        }
+    errors = check(bundle)
+    if change == "observed_omission":
+        assert errors == []
+        assert event["data"]["object"]["payment_method_options"]["crypto"] == {}
+    else:
+        assert any("provider succeeded event" in error for error in errors)
