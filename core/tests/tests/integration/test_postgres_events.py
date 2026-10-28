@@ -1050,3 +1050,55 @@ def test_delivery_counts_are_read_only_and_transaction_scoped(migrated_postgres:
             assert delivery_counts_sync(connection) == before
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_defer_preserves_final_retry_across_worker_restart(migrated_postgres):
+    from pydantic import BaseModel
+
+    class Payload(BaseModel):
+        n: int
+
+    event_type = f"test.defer.{uuid.uuid4().hex}.v1"
+    group = f"defer-{uuid.uuid4().hex}"
+    handled = []
+    async def handle(_env, payload):
+        handled.append(payload.n)
+
+    first = RoutingControlPlaneConsumer(
+        migrated_postgres, ["controlplane.events.v1"], group,
+        {event_type: (Payload, handle)}, max_attempts=1, worker_id="interrupted",
+    )
+    publisher = PostgresEventPublisher(migrated_postgres, "tests")
+    await publisher.start()
+    try:
+        await publisher.publish(tenant_id=uuid.uuid4(), event_type=event_type, payload={"n": 7})
+    finally:
+        await publisher.stop()
+    # Register and claim directly to model a block before the handler runs.
+    first._engine = create_async_engine(normalize_async_url(migrated_postgres))
+    try:
+        assert await first._ensure_registered()
+        rows = await first._claim(limit=1)
+        assert len(rows) == 1 and rows[0]["attempts"] == 1
+        event_id = int(rows[0]["event_id"])
+        assert await first._defer(event_id)
+        assert not await first._defer(event_id)  # Replays do not refund twice.
+        async with first._engine.begin() as conn:
+            row = (await conn.execute(text(
+                "SELECT status, attempts, claimed_by FROM controlplane_event_deliveries "
+                "WHERE consumer_group=:group AND event_id=:event"
+            ), {"group": group, "event": event_id})).one()
+        assert tuple(row) == ("pending", 0, None)
+    finally:
+        await first.stop()
+    restarted = RoutingControlPlaneConsumer(
+        migrated_postgres, ["controlplane.events.v1"], group,
+        {event_type: (Payload, handle)}, max_attempts=1, worker_id="recovered",
+    )
+    try:
+        assert await restarted.poll_once() == 1
+        assert handled == [7]
+        assert await restarted.poll_once() == 0
+    finally:
+        await restarted.stop()
