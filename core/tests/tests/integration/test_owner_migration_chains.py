@@ -393,6 +393,19 @@ def assert_cache_migration_delta(before, after):
     assert len(identity['policies']) == 1
     assert 'app.current_tenant_id' in identity['policies'][0][4]
     assert 'app.current_tenant_id' in identity['policies'][0][5]
+    crawl = after['tables'].pop('aiuditor_crawl_state')
+    assert crawl['rls'] == [True, True]
+    assert [(c[0], c[1], c[2]) for c in crawl['columns']] == [
+        ('tenant_id', 'uuid', True), ('run_id', 'uuid', True),
+        ('started_at', 'timestamp with time zone', True),
+        ('finished_at', 'timestamp with time zone', False), ('error_count', 'integer', True),
+    ]
+    assert any(c[1] == 'p' and c[2] == 'PRIMARY KEY (tenant_id)' for c in crawl['constraints'])
+    assert any(c[1] == 'f' and 'REFERENCES tenants(id)' in c[2] for c in crawl['constraints'])
+    assert any(c[1] == 'c' and 'error_count >= 0' in c[2] for c in crawl['constraints'])
+    assert len(crawl['policies']) == 1
+    assert 'app.current_tenant_id' in crawl['policies'][0][4]
+    assert 'app.current_tenant_id' in crawl['policies'][0][5]
     scoped = after['tables'].pop('aiuditor_private_model_admissions')
     assert scoped['rls'] == [True, True]
     assert {c[0] for c in scoped['columns']} == {
