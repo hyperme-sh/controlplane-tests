@@ -563,6 +563,21 @@ def assert_cache_migration_delta(before, after):
         "'active'::character varying])::text[]))",
     ])
     lease_indexes.sort(key=lambda row: row[0])
+    # Owner migration 0068: exact additive evidence columns on both adoption
+    # paths. Retain the full comparison of existing types, RLS, grants and data.
+    expected['tables']['hypermesh_devices']['columns'].extend([
+        ['environment_changed_at', 'timestamp with time zone', False, None, '', '', None],
+        ['observed_environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
+        ['certified_environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
+    ])
+    expected['tables']['hypermesh_jobs']['columns'].extend([
+        ['result_effects_completed_at', 'timestamp with time zone', False, None, '', '', None],
+        ['environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
+    ])
+    expected['tables']['hypermesh_scorecards']['columns'].extend([
+        ['certification_job_id', 'uuid', False, None, '', '', None],
+        ['environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
+    ])
     assert_source_subscription_delta(expected, after)
     assert after == expected
 
