@@ -563,7 +563,7 @@ def assert_cache_migration_delta(before, after):
         "'active'::character varying])::text[]))",
     ])
     lease_indexes.sort(key=lambda row: row[0])
-    # Owner migration 0067: exact additive evidence columns on both adoption
+    # Owner migration 0068: exact additive evidence columns on both adoption
     # paths. Retain the full comparison of existing types, RLS, grants and data.
     expected['tables']['hypermesh_devices']['columns'].extend([
         ['environment_changed_at', 'timestamp with time zone', False, None, '', '', None],
