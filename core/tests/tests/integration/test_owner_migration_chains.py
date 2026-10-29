@@ -570,8 +570,10 @@ def assert_cache_migration_delta(before, after):
         ['observed_environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
         ['certified_environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
     ])
-    expected['tables']['hypermesh_jobs']['columns'].append(
-        ['environment_hash', 'character varying(71)', False, None, '', '', '"default"'])
+    expected['tables']['hypermesh_jobs']['columns'].extend([
+        ['result_effects_completed_at', 'timestamp with time zone', False, None, '', '', None],
+        ['environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
+    ])
     expected['tables']['hypermesh_scorecards']['columns'].extend([
         ['certification_job_id', 'uuid', False, None, '', '', None],
         ['environment_hash', 'character varying(71)', False, None, '', '', '"default"'],
