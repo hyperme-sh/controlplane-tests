@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "panopticon-tests"
+version = "0.0.0"
+requires-python = ">=3.13"
+description = "Integration tests and shared fixtures for the Panopticon workspace"
+dependencies = [
+    "operator-ban-store",
+    "controlplane-api",
+    "controlplane-tenancy",
+    "controlplane-identity",
+    "panopticon-models[grpc]",
+    "controlplane-events",
+    "controlplane-db",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=6.0.0",
+    "respx>=0.22.0",
+    "testcontainers>=4.9.0",
+    "redis>=5.0.0",
+    "httpx>=0.28.0",
+]
+
+[tool.uv.sources]
+operator-ban-store = { workspace = true }
+controlplane-api = { workspace = true }
+controlplane-tenancy = { workspace = true }
+controlplane-identity = { workspace = true }
+panopticon-models = { workspace = true }
+controlplane-events = { workspace = true }
+controlplane-db = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/panopticon_tests"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/panopticon_tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# Coverage applies to shared contracts only (not the whole monorepo). Target: >=85% on those packages.
+# Integration tests using Testcontainers require Docker; set SKIP_TESTCONTAINERS=1 to skip them (e.g. sandboxed CI).
+addopts = [
+    "--cov=panopticon_models",
+    "--cov=controlplane_events.payloads",
+    "--cov-report=term-missing",
+    "--cov-fail-under=85",
+]

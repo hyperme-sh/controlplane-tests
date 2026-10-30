@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "panopticon-e2e-tests"
+version = "0.0.0"
+requires-python = ">=3.13"
+description = "Multi-service Postgres event-bus integration tests"
+dependencies = [
+    "panopticon-tests",
+    "user-service",
+    "acl-service",
+    "payment-service",
+    "marketplace-service",
+    "ai-service",
+    "controlplane-core",
+    "controlplane-db",
+    "controlplane-events",
+    "panopticon-models",
+    "asgi-lifespan>=2.1.0",
+    "httpx>=0.28.0",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.2.0",
+    "testcontainers>=4.9.0",
+    "controlplane-edge",
+]
+
+[tool.uv.sources]
+panopticon-tests = { workspace = true }
+user-service = { workspace = true }
+acl-service = { workspace = true }
+payment-service = { workspace = true }
+marketplace-service = { workspace = true }
+ai-service = { workspace = true }
+controlplane-core = { workspace = true }
+controlplane-db = { workspace = true }
+controlplane-events = { workspace = true }
+panopticon-models = { workspace = true }
+controlplane-edge = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/panopticon_e2e"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/panopticon_e2e"]
+
+[tool.pytest.ini_options]
+markers = [
+    "phase2_step2: Phase 2 Step 2 REST cross-service flow (listing → purchase → AI inference)",
+]
+testpaths = ["tests"]
+pythonpath = [
+    "src",
+    "../../controlplane-edge/src",
+    "../user-service/src",
+    "../acl-service/src",
+    "../payment-service/src",
+    "../marketplace-service/src",
+    "../ai-service/src",
+    "../auth-service/src",
+    "../lib/controlplane-core/src",
+    "../lib/controlplane-db/src",
+    "../events/src",
+    "../models/src",
+    "../tests/src",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["-q"]
