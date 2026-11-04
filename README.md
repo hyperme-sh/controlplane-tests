@@ -27,10 +27,13 @@ their retention is not a claim that they run independently. No owner tests are
 silently skipped and counted as passing by the package command.
 
 The read-only, pinned main/manual CI workflow validates this package. Actions
-remains disabled pending hosted-worker isolation qualification. Full owner-suite
+remains disabled pending shared-runner qualification. Full owner-suite
 CI, PostgreSQL/RLS/migration and multi-service acceptance remain separate gates.
 
 Version 0.2 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
 `SPANOPTICON_TEST_ALEMBIC_INI`. Update callers and their configuration together.
 Retained owner integration suites remain unqualified source material; their
 namespace updates do not establish service or database integration acceptance.
+
+CI uses the approved shared-local Linux x64 runner group. Actions qualification
+runs the existing main/manual checks; it does not publish or deploy services.
