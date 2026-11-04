@@ -566,7 +566,7 @@ def test_request_retries_once_after_a_blip(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(freshness, "_request_json_once", once)
     monkeypatch.setenv("FRESHNESS_RETRY_DELAY_S", "10")
     status, body = freshness._request_json(
-        "https://api.github.com/repos/FyberLabs/panopticon/commits/main",
+        "https://api.github.com/repos/FyberLabs/spanopticon/commits/main",
         "token",
         1,
         sleep=lambda delay: slept.append(delay),
@@ -588,7 +588,7 @@ def test_request_stops_after_one_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(freshness, "_request_json_once", once)
     monkeypatch.setenv("FRESHNESS_RETRY_DELAY_S", "0")
     status, body = freshness._request_json(
-        "https://api.github.com/repos/FyberLabs/panopticon/commits/main",
+        "https://api.github.com/repos/FyberLabs/spanopticon/commits/main",
         None,
         1,
         sleep=lambda delay: None,

@@ -231,7 +231,7 @@ async def test_cursor_reset_replays(migrated_postgres: str) -> None:
 
 @pytest.mark.asyncio
 async def test_bus_policy_ignores_tenant_guc(migrated_postgres: str) -> None:
-    role = "panopticon_events_tester"
+    role = "spanopticon_events_tester"
     eng = create_engine(migrated_postgres)
     other = uuid.uuid4()
     event_tenant = uuid.uuid4()
@@ -703,7 +703,7 @@ TO {role};
 def test_nobypassrls_role_can_register_with_event_grants_only(migrated_postgres: str) -> None:
     """SHARE is taken inside the definer function. The app role has no UPDATE."""
 
-    role = "panopticon_events_register"
+    role = "spanopticon_events_register"
     group = f"reg-role-{uuid.uuid4().hex[:8]}"
     event_type = f"test.regrole.{uuid.uuid4().hex[:8]}.v1"
     eng = create_engine(migrated_postgres)
@@ -875,7 +875,7 @@ def test_register_lock_timeout_then_retry_delivers(migrated_postgres: str) -> No
 def test_temp_shadow_tables_do_not_capture_definer_writes(migrated_postgres: str) -> None:
     """A caller's temp tables must not hide the real subscription or delivery tables."""
 
-    role = "panopticon_events_shadow"
+    role = "spanopticon_events_shadow"
     group = f"shadow-{uuid.uuid4().hex[:8]}"
     event_type = f"test.shadow.{uuid.uuid4().hex[:8]}.v1"
     eng = create_engine(migrated_postgres)

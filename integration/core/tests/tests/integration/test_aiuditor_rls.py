@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 
 pytestmark = pytest.mark.integration
 
-_ROLE = "panopticon_rls_tester"
+_ROLE = "spanopticon_rls_tester"
 _TABLES = {
     "aiuditor_connections",
     "aiuditor_approvals",

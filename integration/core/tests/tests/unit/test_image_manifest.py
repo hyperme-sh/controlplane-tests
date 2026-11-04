@@ -138,9 +138,9 @@ def test_baked_identity_reads_the_image_config_env() -> None:
 def test_shared_env_does_not_carry_the_deploy_sha() -> None:
     for relative in ("docker-compose.yaml", "docker-compose.vm.yaml"):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        assert "PANOPTICON_IMAGE_TAG: ${PANOPTICON_IMAGE_TAG:-}" not in text
+        assert "SPANOPTICON_IMAGE_TAG: ${SPANOPTICON_IMAGE_TAG:-}" not in text
     vm = (REPO_ROOT / "docker-compose.vm.yaml").read_text(encoding="utf-8")
-    assert vm.count("HYPERMESH_REVISION: ${PANOPTICON_IMAGE_TAG:-}") == 2
+    assert vm.count("HYPERMESH_REVISION: ${SPANOPTICON_IMAGE_TAG:-}") == 2
 
 
 def test_image_manifest_contract_is_documented() -> None:
@@ -152,7 +152,7 @@ def test_image_manifest_contract_is_documented() -> None:
     assert "deploy/test" in text
     assert "force: false" in text
     assert "EDGE_VERSIONS_ACCESS=off" in text
-    assert "terraform/panopticon" in text
+    assert "terraform/spanopticon" in text
     deploy = (REPO_ROOT / "docs" / "deploy-vm.md").read_text(encoding="utf-8")
     assert "Production must set `EDGE_VERSIONS_ACCESS=off`" in deploy
     example = (REPO_ROOT / ".env.vm.example").read_text(encoding="utf-8")
@@ -198,7 +198,7 @@ def test_push_manifest_branch_commits_the_file_and_does_not_move_deploy_test() -
         raise AssertionError(url)
 
     commit = plan.push_manifest_branch(
-        "FyberLabs/panopticon",
+        "FyberLabs/spanopticon",
         "token",
         document,
         message="chore: image manifest for test\n",
@@ -229,7 +229,7 @@ def test_push_manifest_branch_creates_the_ref_when_it_is_absent() -> None:
 
     assert (
         plan.push_manifest_branch(
-            "FyberLabs/panopticon",
+            "FyberLabs/spanopticon",
             "token",
             "{}\n",
             message="chore: image manifest\n",

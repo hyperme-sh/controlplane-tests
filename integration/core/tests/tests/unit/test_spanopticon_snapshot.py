@@ -34,7 +34,7 @@ def test_private_directory_copy_is_rejected(tmp_path, path):
 @pytest.mark.parametrize(("source", "rule"), [
     ("endpoint = 'https://api.test.hyperme.sh'", "test-plane-hostname"),
     ("ADMIN_EMAIL = 'chris@fyberlabs.com'", "private-mailbox"),
-    ("secret_name = 'panopticon-test-idp-google-secret'", "vault-name"),
+    ("secret_name = 'spanopticon-test-idp-google-secret'", "vault-name"),
     ("image = 'ghcr.io/fyberlabs/template-service'", "private-registry"),
     ("FYBER_AGX_DEVICE_ID = 'opaque-id'", "seed-identity"),
     ("runs-on: [self-hosted, linux, x64]", "private-ci"),

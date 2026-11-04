@@ -77,7 +77,7 @@ def test_registry_scans_do_not_widen_rls_authority(billing_owner, rls_isolation_
         assert {row[1] for row in transfer_scan_page(session)} >= set(ids)
         assert {row[0] for row in unfinished_side_effect_claims(session)} >= set(ids)
         assert subscription_tenant(session, str(tb)) == tb
-        session.execute(text("SET LOCAL ROLE panopticon_rls_tester"))
+        session.execute(text("SET LOCAL ROLE spanopticon_rls_tester"))
         session.execute(text("SELECT set_config('app.current_tenant_id', :id, true)"), {"id": str(ta)})
         assert {row[1] for row in transfer_scan_page(session)} == {ids[0]}
         assert {row[0] for row in unfinished_side_effect_claims(session)} == {ids[0]}

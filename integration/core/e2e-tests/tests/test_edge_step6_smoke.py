@@ -18,7 +18,7 @@ from controlplane_edge.graphql.register import register_graphql_routes
 from controlplane_edge.grpc_server import grpc_server_lifespan
 from controlplane_edge.register_cross_cutting import register_gateway_cross_cutting
 
-_PROTO = Path(__file__).resolve().parents[3] / "proto" / "panopticon" / "v1"
+_PROTO = Path(__file__).resolve().parents[3] / "proto" / "spanopticon" / "v1"
 if str(_PROTO) not in sys.path:
     sys.path.insert(0, str(_PROTO))
 

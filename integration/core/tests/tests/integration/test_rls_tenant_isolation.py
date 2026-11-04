@@ -51,7 +51,7 @@ def test_rls_billing_records_isolated_by_tenant(
     assert {r[0] for r in rows} == {bra, brb}
 
     with eng.connect() as conn:
-        conn.execute(text("SET ROLE panopticon_rls_tester"))
+        conn.execute(text("SET ROLE spanopticon_rls_tester"))
         conn.execute(
             text("SELECT set_config('app.current_tenant_id', :tid, true)"),
             {"tid": str(ta)},
@@ -60,7 +60,7 @@ def test_rls_billing_records_isolated_by_tenant(
         assert [r[0] for r in rows] == [bra]
 
     with eng.connect() as conn:
-        conn.execute(text("SET ROLE panopticon_rls_tester"))
+        conn.execute(text("SET ROLE spanopticon_rls_tester"))
         conn.execute(
             text("SELECT set_config('app.current_tenant_id', :tid, true)"),
             {"tid": str(tb)},
@@ -89,7 +89,7 @@ def test_host_organization_bindings_isolate_tenants_and_enforce_org_scope(
                            {"tenant": tenant, "sub": subject, "org": org})
 
         with eng.begin() as cx:
-            cx.execute(text("GRANT SELECT, INSERT, UPDATE, DELETE ON host_organization_bindings TO panopticon_rls_tester"))
+            cx.execute(text("GRANT SELECT, INSERT, UPDATE, DELETE ON host_organization_bindings TO spanopticon_rls_tester"))
             cx.execute(text("INSERT INTO organizations (id, tenant_id, legal_name) VALUES (:id, :tenant, :name)"),
                        {"id": unbound, "tenant": tb, "name": f"Unbound {unbound}"})
 
@@ -102,7 +102,7 @@ def test_host_organization_bindings_isolate_tenants_and_enforce_org_scope(
 
         for tenant, expected, other in ((ta, oa, tb), (tb, ob, ta)):
             with eng.begin() as cx:
-                cx.execute(text("SET LOCAL ROLE panopticon_rls_tester"))
+                cx.execute(text("SET LOCAL ROLE spanopticon_rls_tester"))
                 cx.execute(text("SELECT set_config('app.current_tenant_id', :tid, true)"), {"tid": str(tenant)})
                 rows = cx.execute(text("SELECT organization_id FROM host_organization_bindings WHERE keycloak_sub = :sub"),
                                   {"sub": subject}).scalars().all()
@@ -116,7 +116,7 @@ def test_host_organization_bindings_isolate_tenants_and_enforce_org_scope(
                         cx.execute(text("INSERT INTO host_organization_bindings (tenant_id, keycloak_sub, organization_id) VALUES (:tenant, 'forged', :org)"),
                                    {"tenant": other, "org": expected})
         with eng.begin() as cx:
-            cx.execute(text("SET LOCAL ROLE panopticon_rls_tester"))
+            cx.execute(text("SET LOCAL ROLE spanopticon_rls_tester"))
             cx.execute(text("SELECT set_config('app.current_tenant_id', '', true)"))
             assert cx.execute(text("SELECT organization_id FROM host_organization_bindings")).all() == []
     finally:

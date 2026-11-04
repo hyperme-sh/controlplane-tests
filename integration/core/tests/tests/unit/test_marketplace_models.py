@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from panopticon_models.marketplace import (
+from spanopticon_models.marketplace import (
     Listing,
     ListingType,
     PriceType,
