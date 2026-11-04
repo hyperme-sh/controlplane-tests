@@ -52,7 +52,7 @@ with engine.connect() as connection:
 engine.dispose()
 assert [row['id'] for row in plugin_registry()] == ['hypermesh.aiuditor', 'hypermesh.models', 'hypermesh.hosts', 'hypermesh.aimmune', 'tennessee-windage']
 """, {"SERVICE_NAME": "api-wheel-test", "GIT_SHA": "", "SOURCE_SHA": "", "HYPERMESH_SOURCE_SHA": "",
-       "BUILT_AT": "", "PANOPTICON_IMAGE_DIGEST": "", "IMAGE_DIGEST": "", "CPEDGE_HYPERMESH_SERVICE_URL": ""})
+       "BUILT_AT": "", "SPANOPTICON_IMAGE_DIGEST": "", "IMAGE_DIGEST": "", "CPEDGE_HYPERMESH_SERVICE_URL": ""})
 
 
 def test_plugin_registration_does_not_alias_or_overwrite_declarations():

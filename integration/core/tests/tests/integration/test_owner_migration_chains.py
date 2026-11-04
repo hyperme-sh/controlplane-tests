@@ -14,8 +14,8 @@ from alembic.config import Config
 from testcontainers.postgres import PostgresContainer
 
 from controlplane_db import migrations
-from panopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url, run_alembic_upgrade, alembic_ini_path
-from panopticon_tests.schema import schema_snapshot
+from spanopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url, run_alembic_upgrade, alembic_ini_path
+from spanopticon_tests.schema import schema_snapshot
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[4]

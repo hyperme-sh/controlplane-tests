@@ -3,8 +3,8 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "panopticon-tests"
-version = "0.1.0"
+name = "spanopticon-tests"
+version = "0.2.0"
 requires-python = ">=3.13"
 description = "Explicitly configured PostgreSQL migration test fixtures"
 dependencies = ["alembic>=1.16", "sqlalchemy>=2.0", "psycopg[binary]>=3.2"]
@@ -13,7 +13,7 @@ dependencies = ["alembic>=1.16", "sqlalchemy>=2.0", "psycopg[binary]>=3.2"]
 dev = ["pytest>=8"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/panopticon_tests"]
+packages = ["src/spanopticon_tests"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "integration", "scripts", "pyproject.toml", "uv.lock", "README.md"]

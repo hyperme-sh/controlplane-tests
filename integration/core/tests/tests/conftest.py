@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
-from panopticon_tests.fixtures.postgres import (
+from spanopticon_tests.fixtures.postgres import (
     MigrationTemplates,
     async_db_url,
     normalize_sync_sqlalchemy_url,
@@ -54,7 +54,7 @@ def rls_isolation_role_ready(migrated_postgres: str) -> None:
     Tests that assert tenant isolation ``SET ROLE`` to this role after granting
     ``SELECT`` on the table under test.
     """
-    role = "panopticon_rls_tester"
+    role = "spanopticon_rls_tester"
     eng = create_engine(migrated_postgres)
     with eng.begin() as cx:
         cx.execute(

@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from panopticon_models.ai_metering import AIModel, AgentBudget, TokenUsage
+from spanopticon_models.ai_metering import AIModel, AgentBudget, TokenUsage
 
 
 def test_ai_model_decimal_coercion():
@@ -73,6 +73,6 @@ def test_agent_budget_user_optional():
 
 
 def test_crypto_budget_import_still_distinct():
-    from panopticon_models import AgentBudget, CryptoBudget
+    from spanopticon_models import AgentBudget, CryptoBudget
 
     assert AgentBudget is not CryptoBudget

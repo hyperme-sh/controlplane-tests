@@ -76,5 +76,5 @@ def test_promotion_credential_is_limited_to_final_step():
     assert STEP["env"]["GH_TOKEN"] == "${{ steps.deploy-app.outputs.token }}"
     text = (ROOT / ".github/workflows/ghcr-test.yml").read_text()
     assert "DEPLOY_REF_TOKEN" not in text
-    assert text.count("secrets.PANOPTICON_DEPLOY_APP_PRIVATE_KEY") == 1
+    assert text.count("secrets.SPANOPTICON_DEPLOY_APP_PRIVATE_KEY") == 1
     assert text.count("steps.deploy-app.outputs.token") == 1

@@ -1,4 +1,4 @@
-from panopticon_tests.fixtures.postgres import (
+from spanopticon_tests.fixtures.postgres import (
     MigrationTemplates,
     alembic_ini_path,
     async_db_url,

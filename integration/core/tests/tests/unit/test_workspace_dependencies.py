@@ -1,6 +1,6 @@
 """A service must declare every workspace package it imports.
 
-hypermesh-service imported ``panopticon_models`` without declaring it. Tests
+hypermesh-service imported ``spanopticon_models`` without declaring it. Tests
 passed because they run from one venv with every member installed. The image
 runs ``uv sync --package hypermesh-service``, which never installed it, so the
 new container failed at import and the test API returned 503.
@@ -63,10 +63,10 @@ def test_repository_declares_every_workspace_import():
     assert checker.violations(ROOT) == []
 
 
-def test_hypermesh_declares_panopticon_models():
+def test_hypermesh_declares_spanopticon_models():
     project = tomllib.loads((ROOT / "products/hypermesh/pyproject.toml").read_text())
-    assert "panopticon-models" in project["project"]["dependencies"]
-    assert project["tool"]["uv"]["sources"]["panopticon-models"] == {"workspace": True}
+    assert "spanopticon-models" in project["project"]["dependencies"]
+    assert project["tool"]["uv"]["sources"]["spanopticon-models"] == {"workspace": True}
     assert "COPY core/models ./core/models" in (ROOT / "products/hypermesh/Dockerfile").read_text()
 
 
@@ -423,7 +423,7 @@ def test_overlay_image_without_a_dockerfile_is_still_checked(tmp_path):
             [
                 "services:",
                 "  enroll:",
-                "    image: ghcr.io/fyberlabs/svc-service:${PANOPTICON_IMAGE_TAG:-test}",
+                "    image: ghcr.io/fyberlabs/svc-service:${SPANOPTICON_IMAGE_TAG:-test}",
                 '    entrypoint: ["uv", "run", "--project", "/app/svc", "python", "-m", "svc_service.app"]',
                 "",
             ]

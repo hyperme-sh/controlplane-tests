@@ -1,17 +1,17 @@
 """Fixture configuration never selects an implicit database/migration owner."""
 import pytest
-from panopticon_tests.fixtures import postgres
+from spanopticon_tests.fixtures import postgres
 
 
 def test_configuration_is_required(monkeypatch):
-    monkeypatch.delenv("PANOPTICON_TEST_ALEMBIC_INI", raising=False)
+    monkeypatch.delenv("SPANOPTICON_TEST_ALEMBIC_INI", raising=False)
     with pytest.raises(RuntimeError, match="must select"):
         postgres.alembic_ini_path()
 
 
 @pytest.mark.parametrize("value", ["relative.ini", "/nonexistent/alembic.ini", "/tmp"])
 def test_invalid_configuration_is_rejected(monkeypatch, value):
-    monkeypatch.setenv("PANOPTICON_TEST_ALEMBIC_INI", value)
+    monkeypatch.setenv("SPANOPTICON_TEST_ALEMBIC_INI", value)
     with pytest.raises(RuntimeError, match="existing absolute file"):
         postgres.alembic_ini_path()
 
@@ -21,7 +21,7 @@ def test_invalid_configuration_is_rejected(monkeypatch, value):
 def test_upgrade_restores_environment(monkeypatch, tmp_path, previous, fail):
     config = tmp_path / "alembic.ini"
     config.write_text("[alembic]\nscript_location = %(here)s/migrations\n")
-    monkeypatch.setenv("PANOPTICON_TEST_ALEMBIC_INI", str(config))
+    monkeypatch.setenv("SPANOPTICON_TEST_ALEMBIC_INI", str(config))
     if previous is None:
         monkeypatch.delenv("DATABASE_URL", raising=False)
     else:
@@ -43,7 +43,7 @@ def test_upgrade_restores_environment(monkeypatch, tmp_path, previous, fail):
 
 
 def test_missing_config_restores_environment(monkeypatch):
-    monkeypatch.delenv("PANOPTICON_TEST_ALEMBIC_INI", raising=False)
+    monkeypatch.delenv("SPANOPTICON_TEST_ALEMBIC_INI", raising=False)
     monkeypatch.setenv("DATABASE_URL", "original")
     with pytest.raises(RuntimeError):
         postgres.alembic_upgrade("postgresql://test/db")

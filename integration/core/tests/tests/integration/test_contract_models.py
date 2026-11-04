@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 from solders.keypair import Keypair
 
-from panopticon_models import (
+from spanopticon_models import (
     ACLPolicy,
     CryptoBudget,
     PaymentIntent,
@@ -17,7 +17,7 @@ from panopticon_models import (
     SharedUser,
     SociACLAttributes,
 )
-from panopticon_models.acl import PoliticalViewCategory, SexualOrientationCategory
+from spanopticon_models.acl import PoliticalViewCategory, SexualOrientationCategory
 
 
 def test_shared_tenant_roundtrip():
