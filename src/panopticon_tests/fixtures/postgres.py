@@ -7,13 +7,15 @@ from alembic import command
 from alembic.config import Config
 
 
-def repo_root() -> Path:
-    # panopticon_tests/fixtures/postgres.py -> fixtures -> panopticon_tests -> src -> core/tests -> core -> repo
-    return Path(__file__).resolve().parents[5]
-
-
 def alembic_ini_path() -> Path:
-    return repo_root() / "core" / "lib" / "controlplane-db" / "alembic.ini"
+    """Use an explicitly selected owner migration config, never installation ancestry."""
+    raw = os.environ.get("PANOPTICON_TEST_ALEMBIC_INI", "").strip()
+    if not raw:
+        raise RuntimeError("PANOPTICON_TEST_ALEMBIC_INI must select an owner Alembic config")
+    path = Path(raw)
+    if not path.is_absolute() or not path.is_file():
+        raise RuntimeError("PANOPTICON_TEST_ALEMBIC_INI must be an existing absolute file")
+    return path.resolve()
 
 
 def normalize_sync_sqlalchemy_url(url: str) -> str:
@@ -32,10 +34,7 @@ def normalize_sync_sqlalchemy_url(url: str) -> str:
 
 def run_alembic_upgrade(sync_url: str) -> None:
     """Run Alembic migrations against a sync SQLAlchemy URL (psycopg)."""
-    sync_url = normalize_sync_sqlalchemy_url(sync_url)
-    os.environ["DATABASE_URL"] = sync_url
-    cfg = Config(str(alembic_ini_path()))
-    command.upgrade(cfg, "head")
+    _alembic(sync_url, "upgrade", "head")
 
 
 def async_db_url(sync_psycopg_url: str) -> str:
