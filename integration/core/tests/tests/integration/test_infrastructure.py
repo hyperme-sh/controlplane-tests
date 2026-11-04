@@ -41,7 +41,7 @@ async def test_events_table_round_trip(async_session):
 
     envelope = ControlPlaneEventEnvelope(
         event_type="test.ping.v1",
-        service="panopticon-tests",
+        service="spanopticon-tests",
         payload={"hello": "world"},
     )
     event_id = await insert_event(async_session, envelope)
@@ -53,7 +53,7 @@ async def test_events_table_round_trip(async_session):
         )
     ).one()
     assert row[0] == "test.ping.v1"
-    assert row[1] == "panopticon-tests"
+    assert row[1] == "spanopticon-tests"
 
 
 @pytest.mark.asyncio

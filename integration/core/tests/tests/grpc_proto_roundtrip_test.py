@@ -31,14 +31,14 @@ def test_gen_proto_script_exits_zero() -> None:
 
 
 def test_contractecho_proto_exists() -> None:
-    p = REPO_ROOT / "proto" / "panopticon" / "v1" / "contractecho.proto"
+    p = REPO_ROOT / "proto" / "spanopticon" / "v1" / "contractecho.proto"
     assert p.is_file()
     assert "message UserWire" in p.read_text()
 
 
 def test_shared_user_pb2_roundtrip() -> None:
-    from panopticon_models.grpc.pb2_convert import shared_user_from_pb2, shared_user_to_pb2
-    from panopticon_models.user import SharedUser
+    from spanopticon_models.grpc.pb2_convert import shared_user_from_pb2, shared_user_to_pb2
+    from spanopticon_models.user import SharedUser
 
     u = SharedUser(
         id=uuid.uuid4(),
@@ -56,8 +56,8 @@ def test_shared_user_pb2_roundtrip() -> None:
 
 
 def test_listing_pb2_roundtrip() -> None:
-    from panopticon_models.grpc.pb2_convert import listing_from_pb2, listing_to_pb2
-    from panopticon_models.marketplace import Listing, ListingType, PriceType
+    from spanopticon_models.grpc.pb2_convert import listing_from_pb2, listing_to_pb2
+    from spanopticon_models.marketplace import Listing, ListingType, PriceType
 
     lid = uuid.uuid4()
     tid = uuid.uuid4()
@@ -85,8 +85,8 @@ def test_listing_pb2_roundtrip() -> None:
 
 
 def test_token_usage_pb2_roundtrip() -> None:
-    from panopticon_models.ai_metering import TokenUsage
-    from panopticon_models.grpc.pb2_convert import token_usage_from_pb2, token_usage_to_pb2
+    from spanopticon_models.ai_metering import TokenUsage
+    from spanopticon_models.grpc.pb2_convert import token_usage_from_pb2, token_usage_to_pb2
 
     uid = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -108,8 +108,8 @@ def test_token_usage_pb2_roundtrip() -> None:
 
 
 def test_proto_not_larger_than_json_for_listing() -> None:
-    from panopticon_models.grpc.pb2_convert import listing_to_pb2
-    from panopticon_models.marketplace import Listing, ListingType, PriceType
+    from spanopticon_models.grpc.pb2_convert import listing_to_pb2
+    from spanopticon_models.marketplace import Listing, ListingType, PriceType
 
     tid = uuid.uuid4()
     l = Listing(

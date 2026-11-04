@@ -14,7 +14,7 @@ from testcontainers.postgres import PostgresContainer
 from controlplane_db import migrations
 from controlplane_events import CONTROLPLANE_EVENTS_V1, RoutingControlPlaneConsumer
 from controlplane_events.publisher import PostgresEventPublisher
-from panopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
+from spanopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
 
 pytestmark = pytest.mark.integration
 SOURCE = "payment-service-deposit-outbox"

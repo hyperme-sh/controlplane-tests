@@ -9,12 +9,12 @@ from alembic.config import Config
 
 def alembic_ini_path() -> Path:
     """Use an explicitly selected owner migration config, never installation ancestry."""
-    raw = os.environ.get("PANOPTICON_TEST_ALEMBIC_INI", "").strip()
+    raw = os.environ.get("SPANOPTICON_TEST_ALEMBIC_INI", "").strip()
     if not raw:
-        raise RuntimeError("PANOPTICON_TEST_ALEMBIC_INI must select an owner Alembic config")
+        raise RuntimeError("SPANOPTICON_TEST_ALEMBIC_INI must select an owner Alembic config")
     path = Path(raw)
     if not path.is_absolute() or not path.is_file():
-        raise RuntimeError("PANOPTICON_TEST_ALEMBIC_INI must be an existing absolute file")
+        raise RuntimeError("SPANOPTICON_TEST_ALEMBIC_INI must be an existing absolute file")
     return path.resolve()
 
 

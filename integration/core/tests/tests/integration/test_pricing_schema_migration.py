@@ -20,7 +20,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from panopticon_tests.fixtures.postgres import alembic_ini_path
+from spanopticon_tests.fixtures.postgres import alembic_ini_path
 
 pytestmark = pytest.mark.integration
 

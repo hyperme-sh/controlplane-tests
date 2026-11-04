@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from testcontainers.postgres import PostgresContainer
 
 from controlplane_db import migrations
-from panopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
+from spanopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
 
 pytestmark = pytest.mark.integration
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from panopticon_models.marketplace import Listing, ListingType, PriceType
+from spanopticon_models.marketplace import Listing, ListingType, PriceType
 
 
 def test_v1_listing_payload_without_sku_validates():

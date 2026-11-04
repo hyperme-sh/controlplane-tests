@@ -1,7 +1,7 @@
 # Control plane test fixtures
 
-The `panopticon-tests` distribution provides PostgreSQL migration templates,
-database URL conversion and schema comparison helpers in `panopticon_tests`.
+The `spanopticon-tests` distribution provides PostgreSQL migration templates,
+database URL conversion and schema comparison helpers in `spanopticon_tests`.
 Use Python 3.13 and uv 0.11.26:
 
     uv sync --frozen
@@ -11,7 +11,7 @@ Package checks run from source, an installed wheel outside the checkout and a
 rebuilt source distribution. They use temporary config files and mocked Alembic
 calls; they do not run PostgreSQL, Redis, Docker or deployed-service tests.
 
-Migration callers must set PANOPTICON_TEST_ALEMBIC_INI to an existing absolute
+Migration callers must set SPANOPTICON_TEST_ALEMBIC_INI to an existing absolute
 owner Alembic config path. The package does not infer a monorepo root from its
 installation directory. Use absolute or %(here)s-relative script locations in
 that config and provide its owner dependencies. Choose a disposable test database

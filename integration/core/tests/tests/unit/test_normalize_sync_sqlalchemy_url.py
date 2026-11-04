@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from panopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
+from spanopticon_tests.fixtures.postgres import normalize_sync_sqlalchemy_url
 
 
 @pytest.mark.parametrize(
