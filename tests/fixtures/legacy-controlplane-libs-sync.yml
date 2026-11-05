@@ -1,0 +1,158 @@
+name: Verify tagged controlplane libraries
+on:
+  workflow_call:
+    inputs:
+      library_tag:
+        type: string
+        required: true
+      library_sha:
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        default: Dockerfile
+      build_image:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      library_tag:
+        description: Explicit release tag from controlplane-libs
+        type: string
+        required: true
+      library_sha:
+        description: Reviewed full commit SHA behind that tag
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        default: Dockerfile
+      build_image:
+        description: Verify the consumer Dockerfile using a BuildKit secret; never push
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  sync:
+    if: github.event.repository.private == true && github.ref == 'refs/heads/main'
+    environment: controlplane-libs-read
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate explicit release selection
+        env:
+          LIB_TAG: ${{ inputs.library_tag }}
+          LIB_SHA: ${{ inputs.library_sha }}
+        run: |
+          python3 - <<'PY'
+          import os,re
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?', os.environ['LIB_TAG']):
+              raise ValueError('Explicit library release tag required')
+          if not re.fullmatch(r'[0-9a-f]{40}', os.environ['LIB_SHA']):
+              raise ValueError('Full library commit SHA required')
+          PY
+      - name: Mint read-only library App token
+        id: libraries
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ vars.CONTROLPLANE_LIBS_APP_ID }}
+          private-key: ${{ secrets.CONTROLPLANE_LIBS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: controlplane-libs
+          permission-contents: read
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/controlplane-libs
+          ref: refs/tags/${{ inputs.library_tag }}
+          path: .phase-c-libs
+          token: ${{ steps.libraries.outputs.token }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Verify tag and consumer lock, then sync
+        env:
+          GH_LIBRARY_TOKEN: ${{ steps.libraries.outputs.token }}
+          LIB_TAG: ${{ inputs.library_tag }}
+          LIB_SHA: ${{ inputs.library_sha }}
+        run: |
+          python3 - <<'PY'
+          """Verify a tagged library pin and sync the consumer without persisting credentials."""
+          import base64
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tomllib
+          from urllib.parse import parse_qs, urlsplit
+          
+          REPOSITORY = "FyberLabs/controlplane-libs"
+          TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\Z")
+          SHA = re.compile(r"[0-9a-f]{40}\Z")
+          
+          
+          def validate(tag, sha, checkout, lock):
+              if not TAG.fullmatch(tag) or not SHA.fullmatch(sha):
+                  raise ValueError("An explicit library release tag and full commit SHA are required")
+              head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+              if head != sha:
+                  raise ValueError("Library tag resolved to a different commit")
+              packages = tomllib.loads(Path(lock).read_text())["package"]
+              matched = 0
+              for package in packages:
+                  source = package.get("source", {}).get("git")
+                  if not isinstance(source, str):
+                      continue
+                  url = urlsplit(source)
+                  path = url.path.removesuffix(".git").strip("/").lower()
+                  if url.hostname != "github.com" or path != REPOSITORY.lower():
+                      continue
+                  query = parse_qs(url.query)
+                  if (url.scheme != "https" or url.username or url.password or url.port
+                          or url.fragment != sha or query not in ({"tag": [tag]}, {"rev": [sha]})):
+                      raise ValueError("Consumer lock differs from the verified library release")
+                  matched += 1
+              if not matched:
+                  raise ValueError("Consumer lock contains no verified controlplane-libs dependency")
+          
+          
+          def sync(token):
+              if not token or any(c.isspace() for c in token):
+                  raise ValueError("A scoped library App token is required")
+              header = "Authorization: Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()
+              # GitHub masks the raw App output; also mask its derived HTTP encoding.
+              print("::add-mask::" + header.split(" ")[-1], flush=True)
+              env = dict(os.environ)
+              for key in list(env):
+                  if key.startswith("GIT_CONFIG_") or key in {"GH_LIBRARY_TOKEN", "GIT_ASKPASS", "SSH_ASKPASS"}:
+                      del env[key]
+              env.update(GIT_CONFIG_COUNT="2", GIT_TERMINAL_PROMPT="0")
+              for i, suffix in enumerate(("", ".git")):
+                  env[f"GIT_CONFIG_KEY_{i}"] = f"http.https://github.com/{REPOSITORY}{suffix}.extraheader"
+                  env[f"GIT_CONFIG_VALUE_{i}"] = header
+              subprocess.run(["uv", "sync", "--frozen", "--no-dev"], env=env, check=True)
+          
+          
+          if __name__ == "__main__":
+              validate(os.environ["LIB_TAG"], os.environ["LIB_SHA"], Path(".phase-c-libs"), Path("uv.lock"))
+              sync(os.environ.get("GH_LIBRARY_TOKEN", ""))
+          PY
+      # Same shared debrunner dockerd. driver: docker skips the moby/buildkit
+      # pull. This step does not push; attestations stay off so a local build
+      # does not write them into the shared containerd store.
+      - uses: docker/setup-buildx-action@v4
+        if: inputs.build_image
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v7
+        if: inputs.build_image
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: false
+          provenance: false
+          sbom: false
+          secrets: |
+            github_token=${{ steps.libraries.outputs.token }}

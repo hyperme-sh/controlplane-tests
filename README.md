@@ -99,3 +99,9 @@ publisher independently verifies a real immutable stable baseline and refuses
 qualification snapshots, even if a caller job reports success. Existing valid
 stable records are retained; no release, version change, deployment or human
 approval prerequisite is introduced by this correction.
+
+Historical combined-library workflow validation is retained in
+`tests/test_legacy_library_sync.py` with its frozen workflow fixture. These eight
+cases preserve pin-validation and credential-handling assertions while allowing
+the obsolete Panopticon workflow to be retired. They do not qualify current
+service CI, which uses per-job App repository allowlists and immutable locks.
