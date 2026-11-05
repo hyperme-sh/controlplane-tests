@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "spanopticon-tests"
 version = "0.24.0"
 requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 description = "Explicitly configured PostgreSQL migration test fixtures"
 dependencies = ["alembic>=1.16", "sqlalchemy>=2.0", "psycopg[binary]>=3.2"]
 
@@ -16,7 +18,7 @@ dev = ["pytest>=8", "pyyaml>=6"]
 packages = ["src/spanopticon_tests"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "integration", "scripts", "pyproject.toml", "uv.lock", "README.md"]
+include = ["LICENSE", "src", "tests", "integration", "scripts", "pyproject.toml", "uv.lock", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
