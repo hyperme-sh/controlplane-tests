@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "hyperme-sh/controlplane-tests",
+  "tag": "v0.24.0",
+  "revision": "943df6f85ac9650dc2944ab5ec9e6ab793f3003a",
+  "release_id": 434678600,
+  "assets": {
+    "release-manifest.json": "sha256:6cc56b013ffffb8d2c7902c374fb66dc2842034feb80b16d4cabd216ac79e91d",
+    "spanopticon_tests-0.24.0-py3-none-any.whl": "sha256:e98fcd352825bc4e96ab2cf689c4e945612311eeb72af6c97dfa9998ccb710ff",
+    "spanopticon_tests-0.24.0.tar.gz": "sha256:e151b3923867a02d1ef4f615e5b4c58d33efd27e1785d8d92ca8efdea106956a"
+  },
+  "published_release_url": "https://github.com/hyperme-sh/controlplane-tests/releases/tag/v0.24.0",
+  "qualification": "Existing immutable stable distribution; runtime deployment and coordinated consumer acceptance remain separate."
+}
