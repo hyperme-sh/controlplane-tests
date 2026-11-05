@@ -105,3 +105,8 @@ Historical combined-library workflow validation is retained in
 cases preserve pin-validation and credential-handling assertions while allowing
 the obsolete Panopticon workflow to be retired. They do not qualify current
 service CI, which uses per-job App repository allowlists and immutable locks.
+
+## License
+
+This package is licensed under [Apache-2.0](LICENSE). Dependencies retain their
+own licenses; this declaration does not relicense bundled third-party material.
