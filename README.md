@@ -1,5 +1,14 @@
 # Control plane test fixtures
 
+## Current version authority
+
+Current development version: `0.2.0`. The services remain before the unreleased
+0.24.0 milestone. Earlier 0.24/1.0 preparation and publication notes below are
+historical and do not authorize those versions. Existing tags and historical
+artifacts remain untouched. Development uses exact source pins and rebuilt
+artifacts; no prior release is required. Version changes, tags and publication
+require the owner's explicit authorization to the agent.
+
 The `spanopticon-tests` distribution provides PostgreSQL migration templates,
 database URL conversion and schema comparison helpers in `spanopticon_tests`.
 Use Python 3.13 and uv 0.11.26:
