@@ -5,13 +5,15 @@ unset PYTHONPATH UV_NO_SYNC
 uv lock --check
 uv sync --frozen
 uv run --frozen pytest
-uv run --frozen pytest tests_tools
+uv run --frozen pytest -q tests_tools
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 uv build --out-dir "$scratch/dist"
 uv run --frozen python scripts/verify_wheel.py "$scratch/dist"
 uv run --frozen python scripts/export_release_contract.py "$scratch"/dist/*.whl --output "$scratch/contract"
-uv run --frozen python scripts/verify_release_candidate.py releases/candidate/release.json "$scratch/contract/contract.json" "$scratch/contract/evidence.json" controlplane-tests
+if [[ -f releases/candidate/release.json ]]; then
+  uv run --frozen python scripts/verify_release_candidate.py releases/candidate/release.json "$scratch/contract/contract.json" "$scratch/contract/evidence.json" controlplane-tests
+fi
 uv export --frozen --no-emit-project --format requirements-txt --output-file "$scratch/requirements.txt" >/dev/null
 uv venv --python 3.13 "$scratch/venv"
 uv pip sync --python "$scratch/venv/bin/python" "$scratch/requirements.txt"

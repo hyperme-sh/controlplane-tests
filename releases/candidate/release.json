@@ -5,7 +5,7 @@
     "controlplane-tests": {
       "version": "0.24.0",
       "contract": "contract.json",
-      "contract_sha256": "31805b06b1c2ab303073d92e5afa253bb825f4e472f51244a929af8c7e5a6460",
+      "contract_sha256": "920f8bf1ecbb4f47b9fbd456d6b8dfb564f1c28661d76d16edb8658454d2da98",
       "artifact": {
         "kind": "package",
         "uri": "urn:sha256:e98fcd352825bc4e96ab2cf689c4e945612311eeb72af6c97dfa9998ccb710ff",

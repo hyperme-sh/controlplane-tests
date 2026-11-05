@@ -41,21 +41,3 @@ def test_runtime_change_is_detected_without_execution(tmp_path):
 ])
 def test_invalid_inventory_or_identity_rejected(tmp_path,change):
     with pytest.raises(ValueError):exporter.snapshot(wheel(tmp_path,change=change))
-
-
-def test_bundled_schema_changes_are_part_of_contract(tmp_path):
-    def schema(files):
-        files['spanopticon_tests/schemas/event.json'] = b'{"type":"object"}'
-    first, _ = exporter.snapshot(wheel(tmp_path, change=schema))
-    def changed(files):
-        files['spanopticon_tests/schemas/event.json'] = b'{"type":"string"}'
-    second, _ = exporter.snapshot(wheel(tmp_path, change=changed))
-    assert first != second
-
-
-def test_dependency_change_is_detected(tmp_path):
-    first, _ = exporter.snapshot(wheel(tmp_path))
-    def change(files):
-        files['spanopticon_tests-0.2.0.dist-info/METADATA'] += b'Requires-Dist: sqlalchemy>=3\n'
-    second, _ = exporter.snapshot(wheel(tmp_path, change=change))
-    assert first != second

@@ -8,8 +8,10 @@ Use Python 3.13 and uv 0.11.26:
     bash scripts/check-package.sh
 
 Package checks run from source, an installed wheel outside the checkout and a
-rebuilt source distribution. They use temporary config files and mocked Alembic
-calls; they do not run PostgreSQL, Redis, Docker or deployed-service tests.
+rebuilt source distribution. The offline cases use temporary configs and mocked Alembic calls. With
+TEST_DATABASE_URL set to a disposable administrative PostgreSQL server, the consumer
+case runs a real two-revision Alembic chain, clones templates, verifies data isolation
+and detects schema/RLS changes. It does not qualify archived owner suites.
 
 Migration callers must set SPANOPTICON_TEST_ALEMBIC_INI to an existing absolute
 owner Alembic config path. The package does not infer a monorepo root from its
@@ -26,18 +28,17 @@ layout and fixture setup. They are excluded from default package collection;
 their retention is not a claim that they run independently. No owner tests are
 silently skipped and counted as passing by the package command.
 
-The read-only, pinned main/manual CI workflow validates this package. Actions publishes validated main artifacts. Full owner-suite
+The read-only, pinned main/manual CI workflow validates this package. The separate read-only hosted PR workflow and existing main runner lane both
+include disposable PostgreSQL consumer qualification. Full owner-suite
 CI, PostgreSQL/RLS/migration and multi-service acceptance remain separate gates.
 
-Version 0.24 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
+Version 0.2 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
 `SPANOPTICON_TEST_ALEMBIC_INI`. Update callers and their configuration together.
 Retained owner integration suites remain unqualified source material; their
 namespace updates do not establish service or database integration acceptance.
 
-Main/manual package validation uses the shared-local Linux x64 runner group.
-PR validation runs on disposable GitHub-hosted Ubuntu workers with read-only
-permissions, no deployment credentials and no publication step. Neither package
-validation job deploys services.
+CI uses the approved shared-local Linux x64 runner group. Actions qualification
+runs the existing main/manual checks; it does not publish or deploy services.
 
 ## Release channels
 
@@ -54,12 +55,16 @@ new main revision. The publisher verifies the run, source, workflow and artifact
 digest independently of release metadata. Repository immutable releases must be
 enabled. See the [shared release contract](https://github.com/hyperme-sh/.github/blob/7749591fccd30d46ba9b0adabe82114001c9d0de/actions/release-channel/README.md).
 
-## Compatibility baseline
+## Artifact contracts
 
-The accepted 0.2.0 bundle records the exact immutable main test artifact and its
-Actions archive provenance. The 0.24.0 candidate changes package metadata only.
-CI binds its declared digest to the wheel actually built and compares the complete
-packaged runtime and dependency contract with the sdist rebuild. This conservative
-contract detects implementation changes too; it does not infer semantic compatibility.
-Source, installed-wheel and rebuilt-wheel tests exercise the same fixture helpers.
-PostgreSQL/RLS, owner integration and deployment acceptance remain separate.
+The root distribution is version 0.24.0. CI exports all packaged runtime/resource
+bytes from the actual wheel without importing candidate code, binds the candidate
+version and digest to that build, and compares rebuilt-sdist contracts. Conservative
+byte equality rejects implementation-only patch changes as well. Installer-metadata
+and semantic compatibility remain separate; archived owner/multilanguage artifacts
+are not counted as independently qualified by the root package tests.
+
+Pull requests run the same package and disposable PostgreSQL checks on GitHub-hosted
+Ubuntu workers with read-only permissions and no publication step. PR code never
+runs on the persistent shared-local runner; main/manual validation retains that
+runner and publishes only validated main-push artifacts.

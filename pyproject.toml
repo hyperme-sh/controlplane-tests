@@ -16,7 +16,7 @@ dev = ["pytest>=8"]
 packages = ["src/spanopticon_tests"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "integration", "tests_tools", "releases", "scripts", "pyproject.toml", "uv.lock", "README.md"]
+include = ["src", "tests", "integration", "scripts", "pyproject.toml", "uv.lock", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

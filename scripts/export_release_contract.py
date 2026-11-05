@@ -1,4 +1,4 @@
-"""Inspect complete test fixture wheel contents without importing candidate code."""
+"""Inspect complete tests wheel contents without importing candidate code."""
 import argparse
 import email.parser
 import hashlib
@@ -17,7 +17,7 @@ def snapshot(wheel):
             raise ValueError('Duplicate or unsafe wheel paths')
         metadata_files = [n for n in names if re.fullmatch(r'spanopticon_tests-[^/]+\.dist-info/METADATA', n)]
         if len(metadata_files) != 1:
-            raise ValueError('Expected one test fixture distribution')
+            raise ValueError('Expected one tests distribution')
         prefix = metadata_files[0].removesuffix('METADATA')
         runtime = [n for n in names if not n.startswith(prefix)]
         if not runtime or any(not n.startswith('spanopticon_tests/') for n in runtime):
@@ -32,11 +32,9 @@ def snapshot(wheel):
         contents = {n: archive.read(n) for n in sorted(runtime)}
     root = contents.get('spanopticon_tests/__init__.py')
     if root is None:
-        raise ValueError('Missing test fixture package exports')
+        raise ValueError('Missing tests package exports')
     contract = {'schema_version': 1,
-                'coverage': 'conservative complete packaged test fixture runtime and dependency declarations; implementation changes require compatibility assessment',
-                'requires_python': metadata.get('Requires-Python'),
-                'requires_dist': sorted(metadata.get_all('Requires-Dist', [])),
+                'coverage': 'conservative complete packaged tests complete packaged runtime and resources',
                 'packaged_file_sha256': {n: hashlib.sha256(b).hexdigest() for n, b in contents.items()}}
     encoded = (json.dumps(contract, sort_keys=True, indent=2)+'\n').encode()
     evidence = {'schema_version': 1, 'distribution': 'spanopticon-tests', 'version': ver,
