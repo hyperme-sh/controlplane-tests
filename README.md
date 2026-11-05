@@ -26,11 +26,10 @@ layout and fixture setup. They are excluded from default package collection;
 their retention is not a claim that they run independently. No owner tests are
 silently skipped and counted as passing by the package command.
 
-The read-only, pinned main/manual CI workflow validates this package. Actions
-remains disabled pending shared-runner qualification. Full owner-suite
+The read-only, pinned main/manual CI workflow validates this package. Actions publishes validated main artifacts. Full owner-suite
 CI, PostgreSQL/RLS/migration and multi-service acceptance remain separate gates.
 
-Version 0.2 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
+Version 0.24 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
 `SPANOPTICON_TEST_ALEMBIC_INI`. Update callers and their configuration together.
 Retained owner integration suites remain unqualified source material; their
 namespace updates do not establish service or database integration acceptance.
@@ -52,3 +51,13 @@ organization policy may shorten it). Expired evidence fails closed: validate a
 new main revision. The publisher verifies the run, source, workflow and artifact
 digest independently of release metadata. Repository immutable releases must be
 enabled. See the [shared release contract](https://github.com/hyperme-sh/.github/blob/7749591fccd30d46ba9b0adabe82114001c9d0de/actions/release-channel/README.md).
+
+## Compatibility baseline
+
+The accepted 0.2.0 bundle records the exact immutable main test artifact and its
+Actions archive provenance. The 0.24.0 candidate changes package metadata only.
+CI binds its declared digest to the wheel actually built and compares the complete
+packaged runtime and dependency contract with the sdist rebuild. This conservative
+contract detects implementation changes too; it does not infer semantic compatibility.
+Source, installed-wheel and rebuilt-wheel tests exercise the same fixture helpers.
+PostgreSQL/RLS, owner integration and deployment acceptance remain separate.
