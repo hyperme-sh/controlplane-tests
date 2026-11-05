@@ -70,3 +70,12 @@ The accepted record binds the existing immutable `v0.24.0` release to its actual
 GitHub release ID, source revision and published asset digests. Test snapshots
 remain under `releases/qualification` and do not establish stable acceptance.
 Runtime deployment and coordinated consumer acceptance remain separate.
+
+### Actions qualification and stable publication
+
+Main merges and workflow completion do not publish GitHub test releases. Exact
+qualification files remain in Actions artifacts with finite retention. The pinned
+publisher independently verifies a real immutable stable baseline and refuses
+qualification snapshots, even if a caller job reports success. Existing valid
+stable records are retained; no release, version change, deployment or human
+approval prerequisite is introduced by this correction.
