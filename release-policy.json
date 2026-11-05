@@ -2,7 +2,7 @@
   "schema_version": 1,
   "repository": "hyperme-sh/controlplane-tests",
   "component": "controlplane-tests",
-  "line": "0.24",
+  "line": "0.2",
   "version_files": [
     "pyproject.toml"
   ]

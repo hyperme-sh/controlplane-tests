@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "line": "0.24",
+  "line": "0.2",
   "components": {
     "controlplane-tests": {
-      "version": "0.24.0",
+      "version": "0.2.0",
       "contract": "contract.json",
       "contract_sha256": "920f8bf1ecbb4f47b9fbd456d6b8dfb564f1c28661d76d16edb8658454d2da98",
       "artifact": {
         "kind": "package",
-        "uri": "urn:sha256:144e888cc70ad564f4bd59274aaafdbcb13c9669ac5c96e9fb6d74fcbdce2d0d",
-        "sha256": "144e888cc70ad564f4bd59274aaafdbcb13c9669ac5c96e9fb6d74fcbdce2d0d"
+        "uri": "urn:sha256:30c1bdae57e62cb1db7d1c4b6f75a280fe7cfb5107e00d6dea0c688e7687e79a",
+        "sha256": "30c1bdae57e62cb1db7d1c4b6f75a280fe7cfb5107e00d6dea0c688e7687e79a"
       }
     }
   }
