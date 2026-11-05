@@ -3,7 +3,7 @@
   "packaged_file_sha256": {
     "spanopticon_tests/__init__.py": "c1a9adc8cd615fd2d6be5c1d536e1069aaf94e593d9e54dbab74496e9ce57bda",
     "spanopticon_tests/fixtures/__init__.py": "da0155f90401cf98250504d0ed42a650ee66ac53f7ba38b32ad86ce42a8d30b9",
-    "spanopticon_tests/fixtures/postgres.py": "43f6583e7acf7642a46140312e249dcc3784ea5966ceb8fc13281cfa2b50d894",
+    "spanopticon_tests/fixtures/postgres.py": "1091ea78d29cb3ea7cb80ef22488a74e019becd7fcd8ccaefdd10f2d3b388744",
     "spanopticon_tests/schema.py": "57f91a48d214683745ee0efb287092b7fe10a95c9ee66391e07d8a7513d4ef96"
   },
   "schema_version": 1
