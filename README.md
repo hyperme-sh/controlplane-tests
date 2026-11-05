@@ -26,8 +26,8 @@ a single linear head, and rejects multiple heads, branch-and-merge graphs, and
 `depends_on` edges before it creates any template database. A template at
 revision R is cloned from the nearest earlier template and upgraded only across
 the missing revisions. `database()` copies a template into a fresh database for
-one test. `drop()` and `dispose()` tear those databases and the admin engine
-down.
+one test. `drop(name)` removes that database. `dispose()` closes the
+administrative engine and leaves every database in place, including templates.
 
 `run_alembic_upgrade`, `alembic_upgrade`, and `alembic_downgrade` point Alembic
 at one sync URL. For the duration of the command they set the process
@@ -92,23 +92,34 @@ from spanopticon_tests.fixtures.postgres import MigrationTemplates
 from spanopticon_tests.schema import schema_snapshot
 
 templates = MigrationTemplates(os.environ["TEST_DATABASE_URL"], prefix="demo")
+head = None
+name = None
+engine = None
 try:
     head = templates.template_at("head")
     name, url = templates.database(head, label="case")
     engine = create_engine(url)
     with engine.connect() as connection:
         snapshot = schema_snapshot(connection)
-    engine.dispose()
-    templates.drop(name)
 finally:
+    if engine is not None:
+        engine.dispose()
+    if name is not None:
+        templates.drop(name)
+    if head is not None:
+        templates.drop(head)
     templates.dispose()
 ```
 
-`template_at("head")` migrates an empty database to the single Alembic head.
-`database()` returns `(name, sync_url)` for an isolated copy. Compare
-`snapshot` with a later snapshot after the test alters tables or enables row
-level security. `tests/test_postgres_consumer.py` is a complete two-revision
-example of that pattern.
+`template_at("head")` migrates an empty database to the single Alembic head and
+returns the template database name. `database()` returns `(name, sync_url)` for
+an isolated copy. Compare `snapshot` with a later snapshot after the test
+alters tables or enables row level security. Close the clone's engine, then
+`drop` the copy and the template. A later run with the prefix `demo` builds
+those same names, and `CREATE DATABASE` fails while the earlier template still
+exists. `tests/test_postgres_consumer.py` is a complete two-revision example;
+it uses a unique prefix and drops every database with that prefix after
+`dispose()`.
 
 ## How Hypermesh uses it
 
