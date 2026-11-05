@@ -12,6 +12,8 @@ dependencies = [
   "pytest-asyncio>=1.2",
   "asgi-lifespan>=2.1",
   "httpx>=0.28",
+  "respx>=0.22",
+  "redis>=5",
   "testcontainers>=4.9"
 ]
 
