@@ -19,8 +19,11 @@ Use Python 3.13 and uv 0.11.26:
 Package checks run from source, an installed wheel outside the checkout and a
 rebuilt source distribution. The offline cases use temporary configs and mocked Alembic calls. With
 TEST_DATABASE_URL set to a disposable administrative PostgreSQL server, the consumer
-case runs a real two-revision Alembic chain, clones templates, verifies data isolation
-and detects schema/RLS changes. It does not qualify archived owner suites.
+cases run a real two-revision Alembic chain, clone templates, verify data isolation
+and detect schema/RLS changes. Branch-and-merge graphs are rejected before any
+template database is created, in either sibling request order. Template reuse
+supports linear migration graphs only; multiple heads and dependency edges also
+fail before mutation. These checks do not qualify archived owner suites.
 
 Migration callers must set SPANOPTICON_TEST_ALEMBIC_INI to an existing absolute
 owner Alembic config path. The package does not infer a monorepo root from its

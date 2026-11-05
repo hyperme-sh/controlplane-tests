@@ -21,14 +21,9 @@ def alembic_ini_path() -> Path:
 def normalize_sync_sqlalchemy_url(url: str) -> str:
     """Force psycopg3 driver (postgresql+psycopg). Testcontainers may emit postgresql+psycopg2://."""
     u = url.strip()
-    if "+asyncpg" in u:
-        return u.replace("+asyncpg", "+psycopg", 1)
-    if u.startswith("postgresql+psycopg2://"):
-        return "postgresql+psycopg://" + u.removeprefix("postgresql+psycopg2://")
-    if u.startswith("postgresql://"):
-        return "postgresql+psycopg://" + u.removeprefix("postgresql://")
-    if u.startswith("postgres://"):
-        return "postgresql+psycopg://" + u.removeprefix("postgres://")
+    driver, separator, remainder = u.partition("://")
+    if separator and driver in {"postgres", "postgresql", "postgresql+psycopg2", "postgresql+asyncpg"}:
+        return "postgresql+psycopg://" + remainder
     return u
 
 
@@ -38,7 +33,11 @@ def run_alembic_upgrade(sync_url: str) -> None:
 
 
 def async_db_url(sync_psycopg_url: str) -> str:
-    return sync_psycopg_url.replace("+psycopg", "+asyncpg", 1)
+    normalized = normalize_sync_sqlalchemy_url(sync_psycopg_url)
+    prefix = "postgresql+psycopg://"
+    if normalized.startswith(prefix):
+        return "postgresql+asyncpg://" + normalized.removeprefix(prefix)
+    return normalized
 
 
 def database_url(server_url: str, name: str) -> str:
@@ -70,8 +69,9 @@ class MigrationTemplates:
     xdist worker), migrates each requested revision into a template database
     once, and hands every test its own ``CREATE DATABASE ... TEMPLATE`` copy.
 
-    A template at revision R is built by copying the nearest lower template and
-    upgrading it, which runs the same revision steps as an upgrade from empty.
+    A template at revision R is built by copying the nearest earlier template in
+    a verified linear graph. Branches, merges and dependency edges are rejected
+    before creating any template; walk order alone does not establish ancestry.
     The server must not gain the optional ``controlplane``/``controlplane_app``
     roles: several migrations grant to them only when they exist, and the tests
     using this helper expect the role-free behavior a fresh container had.
@@ -115,7 +115,20 @@ class MigrationTemplates:
             heads = script.get_heads()
             if len(heads) != 1:
                 raise RuntimeError(f"migration templates need one Alembic head, found {heads}")
-            chain = [rev.revision for rev in script.walk_revisions()]  # head first
+            revisions = list(script.walk_revisions())  # head first
+            children: dict[str, int] = {}
+            for rev in revisions:
+                parents = rev.down_revision
+                if isinstance(parents, str):
+                    parents = (parents,)
+                parents = parents or ()
+                if len(parents) > 1 or rev.dependencies:
+                    raise RuntimeError("migration templates require a linear Alembic graph; branches, merges and dependencies are unsupported")
+                for parent in parents:
+                    children[parent] = children.get(parent, 0) + 1
+                    if children[parent] > 1:
+                        raise RuntimeError("migration templates require a linear Alembic graph; branches, merges and dependencies are unsupported")
+            chain = [rev.revision for rev in revisions]
             self._order = {rev: len(chain) - i for i, rev in enumerate(chain)}
             self._order["head"] = self._order[heads[0]]
         return self._order[revision]
