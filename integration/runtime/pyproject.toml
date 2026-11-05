@@ -3,11 +3,11 @@ name = "controlplane-owner-integration"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-  "acl-service @ git+https://github.com/hyperme-sh/acl-service.git@a4fd4b3d06b2d330abb75b33c1082971bd431341",
-  "ai-service @ git+https://github.com/hyperme-sh/ai-service.git@c33266c42a60c713da1acb9b8f08890a33667209",
-  "marketplace-service @ git+https://github.com/hyperme-sh/marketplace-service.git@c41aa2c6df714364129e1d4be9f0edb972365034",
-  "payment-service @ git+https://github.com/hyperme-sh/payment-service.git@dbf9b75299821cc1d2ca380344968b76d2f47f91",
-  "user-service @ git+https://github.com/hyperme-sh/user-service.git@59b59044884611bc240bd4fc8cbe710781982e3b#subdirectory=core/user-service",
+  "acl-service @ git+https://github.com/hyperme-sh/acl-service.git@24729a0451831a487a1439c479ce1222b6f19248",
+  "ai-service @ git+https://github.com/hyperme-sh/ai-service.git@a389a8093bf20d2e46c0771f149156ad3427d1e2",
+  "marketplace-service @ git+https://github.com/hyperme-sh/marketplace-service.git@76bb9538edae3799916e80e7f192c6ee1031105d",
+  "payment-service @ git+https://github.com/hyperme-sh/payment-service.git@4204046fe65b3a2b7f8e533bbe10a055c0198588",
+  "user-service @ git+https://github.com/hyperme-sh/user-service.git@3c98ef115d63ab90c8db4ef047658b07dfb464c4#subdirectory=core/user-service",
   "pytest>=8.4",
   "pytest-asyncio>=1.2",
   "asgi-lifespan>=2.1",
@@ -20,14 +20,14 @@ dependencies = [
 [tool.uv]
 package = false
 override-dependencies = [
-  "controlplane-api @ git+https://github.com/hyperme-sh/controlplane-api.git@0f9dbf4e63b86b692936e6f91d4eda832cbf19ad",
-  "auth-service @ git+https://github.com/hyperme-sh/auth-service.git@b5663118cc38271c62b6f968a6310dc6d49db664",
-  "controlplane-core @ git+https://github.com/hyperme-sh/controlplane-core.git@6095a5d0798fbe4767362a4d4389f112ab050e8e",
-  "controlplane-db @ git+https://github.com/hyperme-sh/controlplane-db.git@abdcad2f82b827c4898963dc6b3f0025ed68b9d3",
-  "controlplane-identity @ git+https://github.com/hyperme-sh/controlplane-identity.git@e7c8f42080f41a85a43f5dbbad2cb05ac958c823",
-  "controlplane-tenancy @ git+https://github.com/hyperme-sh/controlplane-tenancy.git@0ed0ab50548f65fdd63ffb7ef614527a7a5158a6",
-  "controlplane-events @ git+https://github.com/hyperme-sh/controlplane-events.git@a04d980e25f71cb1d52fec7f8525633d5eb09e8f",
-  "spanopticon-models @ git+https://github.com/hyperme-sh/controlplane-models.git@1b2e49a1590ba24c8d58c1f14aa2bd64d6a6945e"
+  "controlplane-api @ git+https://github.com/hyperme-sh/controlplane-api.git@82fc8c2ca21531f1a3f7a695257b3465c4a347da",
+  "auth-service @ git+https://github.com/hyperme-sh/auth-service.git@47fc18da54f80b821029424eaac02c27b051399d",
+  "controlplane-core @ git+https://github.com/hyperme-sh/controlplane-core.git@c46bf282a8f1a605cfb8acb9beafb474c0b1b0c8",
+  "controlplane-db @ git+https://github.com/hyperme-sh/controlplane-db.git@95ef61433374274f4a4fc287e15982be6357e1cc",
+  "controlplane-identity @ git+https://github.com/hyperme-sh/controlplane-identity.git@127d15fce7c3af8d8f8e239fb306ce88de76f02a",
+  "controlplane-tenancy @ git+https://github.com/hyperme-sh/controlplane-tenancy.git@f252909af772b2c820555af36de456d46f17cfcb",
+  "controlplane-events @ git+https://github.com/hyperme-sh/controlplane-events.git@2a49f9af5f6c4dc9d6c4ddebc83c41d6331e2c87",
+  "spanopticon-models @ git+https://github.com/hyperme-sh/controlplane-models.git@9a9bbb20c2e0cd41febf3233ce7a48fe17a84b04"
 ]
 
 [tool.pytest.ini_options]
