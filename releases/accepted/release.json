@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "line": "0.24",
+  "components": {
+    "controlplane-tests": {
+      "version": "0.24.0",
+      "contract": "contract.json",
+      "contract_sha256": "920f8bf1ecbb4f47b9fbd456d6b8dfb564f1c28661d76d16edb8658454d2da98",
+      "artifact": {
+        "kind": "package",
+        "uri": "urn:sha256:e98fcd352825bc4e96ab2cf689c4e945612311eeb72af6c97dfa9998ccb710ff",
+        "sha256": "e98fcd352825bc4e96ab2cf689c4e945612311eeb72af6c97dfa9998ccb710ff"
+      }
+    }
+  }
+}
