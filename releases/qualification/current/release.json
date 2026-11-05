@@ -12,5 +12,7 @@
         "sha256": "e98fcd352825bc4e96ab2cf689c4e945612311eeb72af6c97dfa9998ccb710ff"
       }
     }
-  }
+  },
+  "purpose": "artifact-qualification",
+  "stable_release": false
 }

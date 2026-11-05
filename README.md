@@ -63,3 +63,19 @@ version and digest to that build, and compares rebuilt-sdist contracts. Conserva
 byte equality rejects implementation-only patch changes as well. Installer-metadata
 and semantic compatibility remain separate; archived owner/multilanguage artifacts
 are not counted as independently qualified by the root package tests.
+
+## Test qualification and stable acceptance
+
+GitHub `test-<commit>` prereleases are development snapshots. Their embedded
+package version does not reserve a stable version. Artifact and consumer evidence
+lives under `releases/qualification`; the current wheel binding is still checked
+by package CI, alongside any future explicit stable candidate. Earlier test
+snapshot receipts are preserved there with an explicit non-stable classification.
+
+`releases/accepted` and `SPANOPTICON_RELEASE_BASELINE_SHA` are reserved for an
+actual immutable stable GitHub release. The pinned shared guard verifies the live
+release channel, stable tag source and asset digests; a test snapshot cannot
+become accepted through a provenance label. No stable baseline is recorded until
+that release exists. Stable publication remains closed without a valid baseline;
+first stable bootstrap and coordinated release qualification remain separate.
+No stable version, approval prerequisite or deployment is introduced here.
