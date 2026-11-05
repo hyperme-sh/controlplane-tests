@@ -37,3 +37,6 @@ if os.environ.get('MARKETPLACE_TENANT_ID'):
         capture_output=True,
         text=True,
     )
+
+# Business flows must publish envelopes matching the registered wire contracts.
+pytestmark = pytest.mark.usefixtures("validate_published_wire_contracts")

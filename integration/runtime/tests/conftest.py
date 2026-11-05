@@ -77,7 +77,7 @@ def anyio_backend():
     return "asyncio"
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def validate_published_wire_contracts(monkeypatch):
     """Validate real Postgres publisher/outbox envelopes before insertion in e2e tests."""
     from controlplane_events import store
@@ -87,3 +87,23 @@ def validate_published_wire_contracts(monkeypatch):
         validate_event_envelope(envelope)
         return original(envelope)
     monkeypatch.setattr(store, 'envelope_params', checked)
+
+
+@pytest_asyncio.fixture
+async def rls_session(async_engine):
+    import uuid
+    from sqlalchemy import text
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with factory() as session:
+        await session.execute(
+            text("SELECT set_config('app.current_tenant_id', :tid, true)"),
+            {"tid": str(uuid.uuid4())},
+        )
+        yield session
+
+
+@pytest.fixture(scope="session")
+def redis_url(require_docker):
+    from testcontainers.redis import RedisContainer
+    with RedisContainer("redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065") as container:
+        yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"

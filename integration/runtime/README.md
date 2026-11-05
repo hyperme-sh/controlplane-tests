@@ -25,3 +25,10 @@ digest-pinned PostgreSQL and isolated package imports. The shared-tenant test
 uses installed packages rather than searching neighboring monorepo sources.
 The operational edge smoke and source-generator wire comparison remain to be
 assigned to their owners; this suite does not claim their coverage.
+
+The active suite also includes five infrastructure cases transferred unchanged
+from the retained Panopticon suite: migrated PostgreSQL connectivity, tenant GUC,
+Redis connectivity, raw event-store round trip and mocked HTTP. PostgreSQL and
+Redis run in disposable digest-pinned containers. Business-flow tests retain
+registered wire-contract validation; the low-level storage case deliberately
+uses an unregistered synthetic event. All 11 cases must execute without skips.

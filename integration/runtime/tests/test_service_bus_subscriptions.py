@@ -79,3 +79,8 @@ async def test_payment_subscription_accepts_the_shared_wire_contract():
     assert await contract_payment_consumer(receiver).drain() == 1
     assert receiver.completed == [envelope.model_dump_json()]
     assert receiver.abandoned == []
+
+import pytest
+
+# Business flows must publish envelopes matching the registered wire contracts.
+pytestmark = pytest.mark.usefixtures("validate_published_wire_contracts")

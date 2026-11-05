@@ -159,3 +159,6 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
     for app in (user_app, acl_app, pay_app):
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_tenant, None)
+
+# Business flows must publish envelopes matching the registered wire contracts.
+pytestmark = pytest.mark.usefixtures("validate_published_wire_contracts")

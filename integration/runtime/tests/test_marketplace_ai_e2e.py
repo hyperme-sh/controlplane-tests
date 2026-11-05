@@ -157,3 +157,6 @@ async def test_free_agent_listing_purchase_entitles_inference(
     for app in (mkt_app, ai_app):
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_tenant, None)
+
+# Business flows must publish envelopes matching the registered wire contracts.
+pytestmark = pytest.mark.usefixtures("validate_published_wire_contracts")
