@@ -64,6 +64,11 @@ byte equality rejects implementation-only patch changes as well. Installer-metad
 and semantic compatibility remain separate; archived owner/multilanguage artifacts
 are not counted as independently qualified by the root package tests.
 
+Development artifact records live under `releases/qualification`: they retain
+tested bytes and contracts without reserving a stable version. A test prerelease
+is not an accepted stable baseline. Stable promotion still requires independent
+live stable-release provenance and an explicit candidate.
+
 ## Test qualification and stable acceptance
 
 GitHub `test-<commit>` prereleases are development snapshots. Their embedded
