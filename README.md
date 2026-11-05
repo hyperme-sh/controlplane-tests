@@ -49,7 +49,7 @@ Version 0.2 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
 Retained owner integration suites remain unqualified source material; their
 namespace updates do not establish service or database integration acceptance.
 
-CI uses the approved shared-local Linux x64 runner group. Actions qualification
+Private CI uses Linux x64 debrunners; public CI uses disposable hosted Ubuntu. Actions qualification
 runs the existing main/manual checks; it does not publish or deploy services.
 
 ## Release channels
@@ -67,7 +67,7 @@ acceptance and runtime deployment remain separate.
 
 ## Artifact contracts
 
-The root distribution is version 0.24.0. CI exports all packaged runtime/resource
+The root distribution remains version 0.2.0. CI exports all packaged runtime/resource
 bytes from the actual wheel without importing candidate code, binds the candidate
 version and digest to that build, and compares rebuilt-sdist contracts. Conservative
 byte equality rejects implementation-only patch changes as well. Installer-metadata
@@ -122,3 +122,13 @@ service CI, which uses per-job App repository allowlists and immutable locks.
 
 This package is licensed under [Apache-2.0](LICENSE). Dependencies retain their
 own licenses; this declaration does not relicense bundled third-party material.
+
+## Public fixture scope
+
+The public package contains migration/schema test helpers. Retained payment and
+AI integration files are test contracts with synthetic data and provider doubles;
+they do not bundle the private service implementations or operational credentials.
+The standalone fixture suite needs only public dependencies and disposable
+PostgreSQL. The separate owner-integration lane still needs repository-scoped read
+access to its explicitly pinned private owners, and is not credential-free
+self-hosted acceptance. No new tag or release is produced by this change.
