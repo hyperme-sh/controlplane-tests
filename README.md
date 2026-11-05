@@ -1,134 +1,213 @@
-# Control plane test fixtures
+# spanopticon-tests
 
-## Current version authority
+`spanopticon-tests` is the Python package of PostgreSQL test helpers for the
+Hypermesh control plane. Import it as `spanopticon_tests`. It builds migration
+template databases, converts SQLAlchemy database URLs, and snapshots a schema
+so two databases can be compared. Version 0.2.0 on this branch requires Python
+3.13. Runtime dependencies are Alembic `>=1.16`, SQLAlchemy `>=2.0`, and
+`psycopg[binary]>=3.2`.
 
-Current development version: `0.2.0`. The services remain before the unreleased
-0.24.0 milestone. Earlier 0.24/1.0 preparation and publication notes below are
-historical and do not authorize those versions. Existing tags and historical
-artifacts remain untouched. Development uses exact source pins and rebuilt
-artifacts; no prior release is required. Version changes, tags and publication
-require the owner's explicit authorization to the agent.
+## Why
 
-The `spanopticon-tests` distribution provides PostgreSQL migration templates,
-database URL conversion and schema comparison helpers in `spanopticon_tests`.
-Use Python 3.13 and uv 0.11.26:
+Control-plane services keep tenant, user, billing, and metering state in
+PostgreSQL, and their Alembic histories are long. Replaying that history from
+an empty database for every test spends most of the suite on migration rather
+than on the behavior under test. These helpers migrate each requested revision
+once into a template database on a shared disposable server, then hand each
+test its own `CREATE DATABASE ... TEMPLATE` copy. A separate snapshot captures
+tables, defaults, constraints, indexes, row-level security, functions, and
+grants so a test can see what a migration changed.
 
-    uv sync --frozen
-    bash scripts/check-package.sh
+## How it works
 
-Package checks run from source, an installed wheel outside the checkout and a
-rebuilt source distribution. The offline cases use temporary configs and mocked Alembic calls. With
-TEST_DATABASE_URL set to a disposable administrative PostgreSQL server, the consumer
-cases run a real two-revision Alembic chain, clone templates, verify data isolation
-and detect schema/RLS changes. Branch-and-merge graphs are rejected before any
-template database is created, in either sibling request order. Template reuse
-supports linear migration graphs only; multiple heads and dependency edges also
-fail before mutation. These checks do not qualify archived owner suites.
+`MigrationTemplates` keeps one administrative connection per process. It reads
+the Alembic script directory named by `SPANOPTICON_TEST_ALEMBIC_INI`, requires
+a single linear head, and rejects multiple heads, branch-and-merge graphs, and
+`depends_on` edges before it creates any template database. A template at
+revision R is cloned from the nearest earlier template and upgraded only across
+the missing revisions. `database()` copies a template into a fresh database for
+one test. `drop(name)` removes that database. `dispose()` closes the
+administrative engine and leaves every database in place, including templates.
 
-Migration callers must set SPANOPTICON_TEST_ALEMBIC_INI to an existing absolute
-owner Alembic config path. The package does not infer a monorepo root from its
-installation directory. Use absolute or %(here)s-relative script locations in
-that config and provide its owner dependencies. Choose a disposable test database
-explicitly; these helpers execute migrations and create/drop template databases.
-DATABASE_URL is restored after successful or failed migration calls. The
-process-global environment means callers must serialize migration calls within
-a process; separate workers should use separate processes and database prefixes.
+`run_alembic_upgrade`, `alembic_upgrade`, and `alembic_downgrade` point Alembic
+at one sync URL. For the duration of the command they set the process
+environment variable `DATABASE_URL` to the normalized URL, then restore the
+previous value on success or failure. Callers serialize migration commands
+inside one process. Separate workers use separate processes and distinct
+database-name prefixes.
 
-`integration/` retains the owner-dependent test suites as source material. They
-still require reconciliation with service packages, migration chains, source
-layout and fixture setup. They are excluded from default package collection;
-their retention is not a claim that they run independently. No owner tests are
-silently skipped and counted as passing by the package command.
+URL helpers leave credentials, host, port, database, and query intact.
+`normalize_sync_sqlalchemy_url` rewrites `postgres`, `postgresql`,
+`postgresql+psycopg2`, and `postgresql+asyncpg` to `postgresql+psycopg`.
+`async_db_url` rewrites that sync URL to `postgresql+asyncpg`. `database_url`
+returns the same server URL with a different database name. Other drivers are
+left unchanged.
 
-The read-only, pinned main/manual CI workflow validates this package. The separate read-only hosted PR workflow and existing main runner lane both
-include disposable PostgreSQL consumer qualification. Full owner-suite
-CI, PostgreSQL/RLS/migration and multi-service acceptance remain separate gates.
+`schema_snapshot` reads `pg_catalog` over an open SQLAlchemy connection. It
+omits `alembic_version*` tables, object IDs, and row data. Column identity,
+sequence definitions, policies, triggers, and grants remain in the snapshot.
 
-Version 0.2 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
-`SPANOPTICON_TEST_ALEMBIC_INI`. Update callers and their configuration together.
-Retained owner integration suites remain unqualified source material; their
-namespace updates do not establish service or database integration acceptance.
+The Alembic config is always explicit. `SPANOPTICON_TEST_ALEMBIC_INI` must be
+an existing absolute file. `script_location` in that file is an absolute path
+or a `%(here)s` path. The package reads that variable and ignores its
+installation directory. Migrations that `GRANT` to the roles `controlplane` or
+`controlplane_app` only when those roles exist follow the roles present on the
+server you provide. Use a fresh server that has neither role when you want the
+grant behavior of a new container.
 
-Private CI uses Linux x64 debrunners; public CI uses disposable hosted Ubuntu. Actions qualification
-runs the existing main/manual checks; it does not publish or deploy services.
+## Practical use
 
-## Release channels
+Install from a checkout with Python 3.13 and [uv](https://docs.astral.sh/uv/)
+0.11.26, the versions the workflows pin:
 
-Main validation retains its exact qualified files in Actions artifacts. It does
-not create GitHub releases or tags. Historical `test-<commit>` prereleases remain
-qualification evidence and do not establish an accepted stable release.
+```bash
+uv python install 3.13
+uv sync --frozen
+```
 
-Stable publication requires an explicit `vMAJOR.MINOR.PATCH` tag, the exact
-successful main validation artifact, compatible declared contracts and an actual
-immutable stable baseline. The publisher independently verifies that evidence;
-successful caller jobs alone cannot establish acceptance. Missing evidence and
-first-stable bootstrap remain closed. Package qualification, coordinated consumer
-acceptance and runtime deployment remain separate.
+Depend on a pinned revision the same way the services do. `user-service`,
+`ai-service`, and `payment-service` currently pin:
 
-## Artifact contracts
+```text
+spanopticon-tests @ git+https://github.com/hyperme-sh/controlplane-tests.git@78328efbb3c5d788903adc20c7e34e6232053ee2
+```
 
-The root distribution remains version 0.2.0. CI exports all packaged runtime/resource
-bytes from the actual wheel without importing candidate code, binds the candidate
-version and digest to that build, and compares rebuilt-sdist contracts. Conservative
-byte equality rejects implementation-only patch changes as well. Installer-metadata
-and semantic compatibility remain separate; archived owner/multilanguage artifacts
-are not counted as independently qualified by the root package tests.
+Point the helpers at a disposable administrative database. The connection must
+be allowed to `CREATE DATABASE` and `DROP DATABASE`. Set
+`SPANOPTICON_TEST_ALEMBIC_INI` to the absolute path of the service Alembic
+config you want to apply (this repository has no service `alembic.ini` of its
+own):
 
-Development artifact records live under `releases/qualification`: they retain
-tested bytes and contracts without reserving a stable version. A test prerelease
-is not an accepted stable baseline. Stable promotion still requires independent
-live stable-release provenance and an explicit candidate.
+```bash
+export TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
+export SPANOPTICON_TEST_ALEMBIC_INI=/absolute/path/to/alembic.ini
+```
 
-## Test qualification and stable acceptance
+```python
+import os
 
-GitHub `test-<commit>` prereleases are development snapshots. Their embedded
-package version does not reserve a stable version. Artifact and consumer evidence
-lives under `releases/qualification`; the current wheel binding is still checked
-by package CI, alongside any future explicit stable candidate. Earlier test
-snapshot receipts are preserved there with an explicit non-stable classification.
+from sqlalchemy import create_engine
 
-`releases/accepted` and `SPANOPTICON_RELEASE_BASELINE_SHA` are reserved for an
-actual immutable stable GitHub release. The pinned shared guard verifies the live
-release channel, stable tag source and asset digests; a test snapshot cannot
-become accepted through a provenance label. No stable baseline is recorded until
-that release exists. Stable publication remains closed without a valid baseline;
-first stable bootstrap and coordinated release qualification remain separate.
-No stable version, approval prerequisite or deployment is introduced here.
+from spanopticon_tests.fixtures.postgres import MigrationTemplates
+from spanopticon_tests.schema import schema_snapshot
 
+templates = MigrationTemplates(os.environ["TEST_DATABASE_URL"], prefix="demo")
+head = None
+name = None
+engine = None
+try:
+    head = templates.template_at("head")
+    name, url = templates.database(head, label="case")
+    engine = create_engine(url)
+    with engine.connect() as connection:
+        snapshot = schema_snapshot(connection)
+finally:
+    if engine is not None:
+        engine.dispose()
+    if name is not None:
+        templates.drop(name)
+    if head is not None:
+        templates.drop(head)
+    templates.dispose()
+```
 
-### Published stable distribution
+`template_at("head")` migrates an empty database to the single Alembic head and
+returns the template database name. `database()` returns `(name, sync_url)` for
+an isolated copy. Compare `snapshot` with a later snapshot after the test
+alters tables or enables row level security. Close the clone's engine, then
+`drop` the copy and the template. A later run with the prefix `demo` builds
+those same names, and `CREATE DATABASE` fails while the earlier template still
+exists. `tests/test_postgres_consumer.py` is a complete two-revision example;
+it uses a unique prefix and drops every database with that prefix after
+`dispose()`.
 
-The accepted record binds the existing immutable `v0.24.0` release to its actual
-GitHub release ID, source revision and published asset digests. Test snapshots
-remain under `releases/qualification` and do not establish stable acceptance.
-Runtime deployment and coordinated consumer acceptance remain separate.
+## How Hypermesh uses it
 
-### Actions qualification and stable publication
+Lease, host, and renter requests are served by the control-plane services.
+Those running services load their own packages. CI installs this pin from the
+dev dependency group and, where the suite opens PostgreSQL, applies migrations
+to a disposable server before HTTP tests run.
 
-Main merges and workflow completion do not publish GitHub test releases. Exact
-qualification files remain in Actions artifacts with finite retention. The pinned
-publisher independently verifies a real immutable stable baseline and refuses
-qualification snapshots, even if a caller job reports success. Existing valid
-stable records are retained; no release, version change, deployment or human
-approval prerequisite is introduced by this correction.
+- **user-service.** `.github/workflows/service.yml` (`Standalone service`) runs
+  on `main`. Its GitHub App token may read `controlplane-tests`, and
+  `scripts/check-package.sh` syncs the dev pin before pytest.
+  `core/user-service/tests/conftest.py` calls `normalize_sync_sqlalchemy_url`
+  on a Testcontainers `postgres:16-alpine` URL, then
+  `controlplane_db.migrations.upgrade` for the `platform` and `events` chains.
+  The HTTP client then calls user, tenant, host-association, and
+  account-closure routes on that database. The workflow also starts a
+  PostgreSQL 17 service and exports `TEST_DATABASE_URL` on the same step.
+- **ai-service.** `.github/workflows/package.yml` (`Standalone package`) runs
+  on `main` with `controlplane-tests` on the same read allowlist.
+  `tests/integration/conftest.py` sets `SPANOPTICON_TEST_ALEMBIC_INI` to the
+  `alembic.ini` inside the installed `controlplane-db` distribution and calls
+  `run_alembic_upgrade` on a Testcontainers PostgreSQL 16 URL before
+  metered-inference HTTP. That fixture points the upstream model URL at
+  `http://test-llm.invalid/v1`.
+- **payment-service.** `.github/workflows/package.yml` allowlists
+  `controlplane-tests` and `scripts/check-package.sh` installs the dev pin with
+  `uv sync --frozen` before pytest. That run includes the lease-delivery,
+  invoice, and payout modules, which talk to the payment app and provider
+  doubles. `scripts/verify_dependency_fixtures.py` (the `--fixtures` mode of
+  the same script) checks the `spanopticon-tests` git pin, lockfile entry, and
+  vendored wheel together.
 
-Historical combined-library workflow validation is retained in
-`tests/test_legacy_library_sync.py` with its frozen workflow fixture. These eight
-cases preserve pin-validation and credential-handling assertions while allowing
-the obsolete Panopticon workflow to be retired. They do not qualify current
-service CI, which uses per-job App repository allowlists and immutable locks.
+This repository checks the helpers themselves in
+`.github/workflows/package.yml` (push to `main`, and manual dispatch) and
+`.github/workflows/consumer-qualification.yml` (pull requests). Both start
+PostgreSQL 17 (`postgres:17` digest-pinned in the workflow), export
+`TEST_DATABASE_URL` as
+`postgresql+psycopg://postgres:package-test-only@127.0.0.1:<port>/postgres`,
+and run `bash scripts/check-package.sh` with uv 0.11.26 and Python 3.13. On a
+public repository those jobs use `ubuntu-24.04`. The workflow file selects the
+self-hosted `linux`, `x64`, and `debrunner` labels when the repository is
+private.
+
+## Develop and test
+
+URL conversion and Alembic-config tests run offline:
+
+```bash
+uv sync --frozen
+uv run --frozen pytest tests/test_normalize_sync_sqlalchemy_url.py tests/test_migration_config.py tests/test_migration_graph.py
+```
+
+The graph tests that open a real server skip unless `TEST_DATABASE_URL` is set.
+The full package check requires that variable and a disposable administrative
+server. It runs the suite from the checkout, from an installed wheel in a clean
+virtualenv, and from a wheel rebuilt from the sdist, then compares the exported
+wheel contracts:
+
+```bash
+export TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
+bash scripts/check-package.sh
+```
+
+Default pytest collection is `tests/` only (`pyproject.toml`). The trees under
+[`integration/`](integration/README.md) are retained cross-service suites.
+[`integration/runtime/`](integration/runtime/README.md) is what
+`bash scripts/check-owner-integration.sh` runs, and it needs Docker plus read
+access to the pinned service repositories.
+`.github/workflows/owner-integration.yml` is that lane on `main`. It is
+separate from the package check above.
+
+`tests/test_legacy_library_sync.py` keeps eight cases against the frozen
+workflow fixture in `tests/fixtures/legacy-controlplane-libs-sync.yml`. They
+cover pin validation and credential handling for that fixture. Current service
+workflows use a per-job repository allowlist and the lockfile.
+
+## Release and versioning
+
+This checkout's package version is **0.2.0** (`pyproject.toml`), on release
+line `0.2`. Main builds store the validated wheel and sdist as Actions
+artifacts. Stable publication is a `vMAJOR.MINOR.PATCH` tag that passes
+admission and publishes that artifact. The immutable GitHub release
+[v0.24.0](https://github.com/hyperme-sh/controlplane-tests/releases/tag/v0.24.0)
+remains the accepted baseline recorded under `releases/accepted`. Channel
+details are in [docs/releasing.md](docs/releasing.md). Compatibility rules are
+in [docs/release-policy.md](docs/release-policy.md).
 
 ## License
 
 This package is licensed under [Apache-2.0](LICENSE). Dependencies retain their
-own licenses; this declaration does not relicense bundled third-party material.
-
-## Public fixture scope
-
-The public package contains migration/schema test helpers. Retained payment and
-AI integration files are test contracts with synthetic data and provider doubles;
-they do not bundle the private service implementations or operational credentials.
-The standalone fixture suite needs only public dependencies and disposable
-PostgreSQL. The separate owner-integration lane still needs repository-scoped read
-access to its explicitly pinned private owners, and is not credential-free
-self-hosted acceptance. No new tag or release is produced by this change.
+own licenses.
