@@ -29,6 +29,9 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
 
     ta = uuid.uuid4()
     ra = uuid.uuid4()
+    admin_role = uuid.uuid4()
+    actor_id = uuid.uuid4()
+    actor_subject = f"e2e-actor-{uuid.uuid4()}"
     eng = create_engine(migrated_postgres)
     with eng.begin() as cx:
         cx.execute(
@@ -42,6 +45,23 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
             ),
             {"id": ra, "tid": ta},
         )
+        cx.execute(
+            text(
+                "INSERT INTO roles (id, tenant_id, name, permissions) "
+                "VALUES (:id, :tid, 'admin', '[]'::jsonb)"
+            ),
+            {"id": admin_role, "tid": ta},
+        )
+        cx.execute(
+            text(
+                "INSERT INTO users (id, tenant_id, keycloak_sub, email, "
+                "first_name, last_name, gender, is_active, role_id) "
+                "VALUES (:id, :tid, :sub, :email, 'Event', 'Actor', "
+                "'unspecified', true, :role)"
+            ),
+            {"id": actor_id, "tid": ta, "sub": actor_subject,
+             "email": f"{actor_id}@example.com", "role": ra},
+        )
 
     from acl_service.app import create_app as create_acl_app
     from payment_service.app import create_app as create_payment_app
@@ -53,8 +73,8 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
 
     async def _user() -> AuthMeResponse:
         return AuthMeResponse(
-            sub="11111111-1111-1111-1111-111111111111",
-            email="e2e@example.com",
+            sub=actor_subject,
+            email=f"{actor_id}@example.com",
             tenant_id=ta,
             roles=["admin"],
             scopes=[],
@@ -99,16 +119,32 @@ async def test_user_created_acl_policy_and_payment_upgrades_tenant(
                 async with httpx.AsyncClient(
                     transport=transport_u, base_url="http://user"
                 ) as ucli:
+                    # A signed admin claim cannot replace current database authority.
+                    target = {
+                        "email": f"e2e-{uuid.uuid4().hex[:8]}@example.com",
+                        "first_name": "E",
+                        "last_name": "Two",
+                        "gender": "unspecified",
+                        "is_active": True,
+                    }
+                    denied = await ucli.post(
+                        "/api/v1/users", headers=headers, json=target,
+                    )
+                    assert denied.status_code == 403, denied.text
+                    with eng.begin() as cx:
+                        assert cx.execute(
+                            text("SELECT count(*) FROM users WHERE tenant_id=:tid"),
+                            {"tid": ta},
+                        ).scalar_one() == 1
+                        cx.execute(
+                            text("UPDATE users SET role_id=:role WHERE id=:id AND tenant_id=:tid"),
+                            {"role": admin_role, "id": actor_id, "tid": ta},
+                        )
+
                     ur = await ucli.post(
                         "/api/v1/users",
                         headers=headers,
-                        json={
-                            "email": f"e2e-{uuid.uuid4().hex[:8]}@example.com",
-                            "first_name": "E",
-                            "last_name": "Two",
-                            "gender": "unspecified",
-                            "is_active": True,
-                        },
+                        json=target,
                     )
                     assert ur.status_code == 201, ur.text
                     uid = ur.json()["id"]
