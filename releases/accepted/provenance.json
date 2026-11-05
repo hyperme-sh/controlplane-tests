@@ -1,0 +1,21 @@
+{
+  "repository": "hyperme-sh/controlplane-tests",
+  "revision": "dce0a988e54afeb01102af309633fec4951f0209",
+  "release_id": 434633211,
+  "immutable": true,
+  "tag": "test-dce0a988e54afeb01102af309633fec4951f0209",
+  "run_id": 41943843629,
+  "artifact_id": 13377890854,
+  "assets": {
+    "spanopticon_tests-0.2.0-py3-none-any.whl": "sha256:38a7a9a72ba8e80a1d44f0cf5246d9c950944bc2f257c9825247aed6af51426e",
+    "spanopticon_tests-0.2.0.tar.gz": "sha256:3b45f913948cb314a82419cd163bf09fad2d699f7a68201d11dba8d36f255067"
+  },
+  "published_release_url": "https://github.com/hyperme-sh/controlplane-tests/releases/tag/test-dce0a988e54afeb01102af309633fec4951f0209",
+  "checks": [
+    "successful same-repository main-push package run",
+    "live Actions artifact digest",
+    "release bytes equal tested bytes",
+    "immutable release and tag revision",
+    "asset digests equal manifest"
+  ]
+}
