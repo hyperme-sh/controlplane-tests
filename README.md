@@ -34,8 +34,10 @@ Version 0.24 uses `spanopticon-tests`, imports `spanopticon_tests`, and requires
 Retained owner integration suites remain unqualified source material; their
 namespace updates do not establish service or database integration acceptance.
 
-CI uses the approved shared-local Linux x64 runner group. Actions qualification
-runs the existing main/manual checks; it does not publish or deploy services.
+Main/manual package validation uses the shared-local Linux x64 runner group.
+PR validation runs on disposable GitHub-hosted Ubuntu workers with read-only
+permissions, no deployment credentials and no publication step. Neither package
+validation job deploys services.
 
 ## Release channels
 
