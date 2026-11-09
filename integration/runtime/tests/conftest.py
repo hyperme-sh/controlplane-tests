@@ -5,7 +5,7 @@ import os
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 from controlplane_db.migrations import upgrade
 
@@ -104,6 +104,6 @@ async def rls_session(async_engine):
 
 @pytest.fixture(scope="session")
 def redis_url(require_docker):
-    from testcontainers.redis import RedisContainer
+    from testcontainers.community.redis import RedisContainer
     with RedisContainer("redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065") as container:
         yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
