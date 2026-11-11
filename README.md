@@ -189,7 +189,8 @@ Default pytest collection is `tests/` only (`pyproject.toml`). The trees under
 `bash scripts/check-owner-integration.sh` runs, and it needs Docker plus read
 access to the pinned service repositories.
 The [nightly workflow](.github/workflows/owner-integration.yml) runs this suite
-on `main`. A newer nightly run supersedes the previous run. CI files an issue
+on `main`, followed by the read-only public TEST gateway smoke. A newer nightly
+run supersedes the previous run. CI files an issue
 for a failed case and links the previous issue for that case if it was closed.
 Pull requests use the separate package and contract checks.
 

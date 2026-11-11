@@ -109,9 +109,43 @@ jobs:
           TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}
         run: rm -rf -- "$TEST_EVIDENCE_DIR"
 
-  report:
-    if: failure() && !cancelled() && needs.integration.result == 'failure'
+  gateway-smoke:
     needs: integration
+    if: "!cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'"
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: hyperme-sh/hypermesh-gateway
+          ref: main
+          persist-credentials: false
+      - name: Verify the public TEST gateway
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/gateway-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          python3 scripts/gateway_post_deploy_smoke.py \
+            --api-base https://api.test.hyperme.sh --evidence-dir "$EVIDENCE_DIR"
+          echo "Gateway smoke source $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain bounded gateway evidence
+        if: "!cancelled()"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gateway-rollout
+          path: ${{ runner.temp }}/gateway-evidence-${{ github.run_id }}-${{ github.run_attempt }}/gateway-rollout.json
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Remove run evidence from runner
+        if: always()
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/gateway-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        run: rm -rf -- "$EVIDENCE_DIR"
+
+  report:
+    if: failure() && !cancelled()
+    needs: [integration, gateway-smoke]
     permissions:
       contents: read
       issues: write
@@ -125,4 +159,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_FAILURES: ${{ needs.integration.outputs.failures }}
+          OWNER_RESULT: ${{ needs.integration.result }}
+          GATEWAY_RESULT: ${{ needs.gateway-smoke.result }}
         run: python3 scripts/nightly_failures.py report

@@ -78,7 +78,7 @@ def report(cases):
             continue
         previous = max(history, key=lambda issue: issue["number"], default=None)
         label = safe_case(case["label"])
-        body = f"{marker(case)}\n\nThe nightly owner integration batch failed for `{label}`.\n\n[CI run]({run_url})"
+        body = f"{marker(case)}\n\nThe nightly integration batch failed for `{label}`.\n\n[CI run]({run_url})"
         if previous:
             body += f"\n\nThis case previously failed in closed issue #{previous['number']}."
         api(endpoint, {"title": f"Nightly integration regression in {label}", "body": body})
@@ -89,7 +89,12 @@ def main():
         print("cases=" + json.dumps([failure_record(case) for case in failures(Path(sys.argv[2]))], separators=(",", ":")))
     elif sys.argv[1:] == ["report"]:
         raw = os.environ.get("NIGHTLY_FAILURES")
-        report(json.loads(raw) if raw else [failure_record("owner integration setup")])
+        cases = json.loads(raw) if raw else []
+        if os.environ.get("OWNER_RESULT") == "failure" and not cases:
+            cases.append(failure_record("owner integration setup"))
+        if os.environ.get("GATEWAY_RESULT") == "failure":
+            cases.append(failure_record("public TEST gateway smoke"))
+        report(cases)
     else:
         raise SystemExit("Use collect JUNIT_FILE or report")
 
