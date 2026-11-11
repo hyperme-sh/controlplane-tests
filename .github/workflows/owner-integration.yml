@@ -1,15 +1,20 @@
-name: Owner integration
+name: Nightly integration
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * *'
+
+concurrency:
+  group: nightly-integration-main
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   integration:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
     timeout-minutes: 20
+    outputs:
+      failures: ${{ steps.failures.outputs.cases }}
     environment: controlplane-libs-read
     steps:
       - name: Mint repository-scoped dependency token
@@ -46,7 +51,7 @@ jobs:
       - name: Run installed owner stack
         env:
           DEPENDENCY_READ_TOKEN: ${{ steps.dependency-token.outputs.token }}
-          TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results
+          TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,10 +89,40 @@ jobs:
           export GIT_CONFIG_VALUE_13="AUTHORIZATION: basic $header"
           unset DEPENDENCY_READ_TOKEN
           bash scripts/check-owner-integration.sh
+      - name: Collect failed test identities
+        id: failures
+        if: failure() && !cancelled()
+        env:
+          TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 scripts/nightly_failures.py collect "$TEST_EVIDENCE_DIR/owner-integration.xml" >> "$GITHUB_OUTPUT"
       - name: Retain executed test identities
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: owner-test-results
-          path: ${{ runner.temp }}/owner-test-results/*.xml
+          path: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}/*.xml
           if-no-files-found: error
           retention-days: 90
+
+      - name: Remove run evidence from runner
+        if: always()
+        env:
+          TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+        run: rm -rf -- "$TEST_EVIDENCE_DIR"
+
+  report:
+    if: failure() && !cancelled() && needs.integration.result == 'failure'
+    needs: integration
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: File or link nightly regressions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_FAILURES: ${{ needs.integration.outputs.failures }}
+        run: python3 scripts/nightly_failures.py report
