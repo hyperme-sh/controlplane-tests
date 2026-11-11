@@ -188,8 +188,11 @@ Default pytest collection is `tests/` only (`pyproject.toml`). The trees under
 [`integration/runtime/`](integration/runtime/README.md) is what
 `bash scripts/check-owner-integration.sh` runs, and it needs Docker plus read
 access to the pinned service repositories.
-`.github/workflows/owner-integration.yml` is that lane on `main`. It is
-separate from the package check above.
+The [nightly workflow](.github/workflows/owner-integration.yml) runs this suite
+on `main`, followed by the read-only public TEST gateway smoke. A newer nightly
+run supersedes the previous run. CI files an issue
+for a failed case and links the previous issue for that case if it was closed.
+Pull requests use the separate package and contract checks.
 
 `tests/test_legacy_library_sync.py` keeps eight cases against the frozen
 workflow fixture in `tests/fixtures/legacy-controlplane-libs-sync.yml`. They
