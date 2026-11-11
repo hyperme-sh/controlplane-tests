@@ -91,9 +91,15 @@ def main():
         raw = os.environ.get("NIGHTLY_FAILURES")
         cases = json.loads(raw) if raw else []
         if os.environ.get("OWNER_RESULT") == "failure" and not cases:
-            cases.append(failure_record("owner integration setup"))
+            label = "owner integration evidence publication" if os.environ.get("OWNER_PROBE") == "success" else "owner integration setup"
+            cases.append(failure_record(label))
         if os.environ.get("GATEWAY_RESULT") == "failure":
-            cases.append(failure_record("public TEST gateway smoke"))
+            probe = os.environ.get("GATEWAY_PROBE")
+            label = {
+                "failure": "public TEST gateway smoke",
+                "success": "gateway smoke evidence publication",
+            }.get(probe, "gateway smoke setup")
+            cases.append(failure_record(label))
         report(cases)
     else:
         raise SystemExit("Use collect JUNIT_FILE or report")

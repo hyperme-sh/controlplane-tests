@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       failures: ${{ steps.failures.outputs.cases }}
+      probe: ${{ steps.owner-stack.outcome }}
     environment: controlplane-libs-read
     steps:
       - name: Mint repository-scoped dependency token
@@ -49,6 +50,7 @@ jobs:
           python-version: '3.13'
           enable-cache: false
       - name: Run installed owner stack
+        id: owner-stack
         env:
           DEPENDENCY_READ_TOKEN: ${{ steps.dependency-token.outputs.token }}
           TEST_EVIDENCE_DIR: ${{ runner.temp }}/owner-test-results-${{ github.run_id }}-${{ github.run_attempt }}
@@ -114,13 +116,17 @@ jobs:
     if: "!cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'"
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
     timeout-minutes: 20
+    outputs:
+      probe: ${{ steps.gateway-probe.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          # The gateway repository is public. Keep this checkout read-only.
           repository: hyperme-sh/hypermesh-gateway
           ref: main
           persist-credentials: false
       - name: Verify the public TEST gateway
+        id: gateway-probe
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/gateway-evidence-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -160,5 +166,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_FAILURES: ${{ needs.integration.outputs.failures }}
           OWNER_RESULT: ${{ needs.integration.result }}
+          OWNER_PROBE: ${{ needs.integration.outputs.probe }}
           GATEWAY_RESULT: ${{ needs.gateway-smoke.result }}
+          GATEWAY_PROBE: ${{ needs.gateway-smoke.outputs.probe }}
         run: python3 scripts/nightly_failures.py report
