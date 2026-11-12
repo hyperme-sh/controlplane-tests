@@ -188,10 +188,13 @@ Default pytest collection is `tests/` only (`pyproject.toml`). The trees under
 [`integration/runtime/`](integration/runtime/README.md) is what
 `bash scripts/check-owner-integration.sh` runs, and it needs Docker plus read
 access to the pinned service repositories.
-The [nightly workflow](.github/workflows/owner-integration.yml) runs this suite
-on `main`, followed by the read-only public TEST gateway smoke. A newer nightly
-run supersedes the previous run. CI files an issue
-for a failed case and links the previous issue for that case if it was closed.
+The [central Infra nightly batch](https://github.com/FyberLabs/infra/blob/main/.github/workflows/nightly-integration.yml)
+runs this harness as `owner-stack` against `main`, daily at 06:23 UTC. Infra also
+owns deployed gateway checks through its `gateway-test` adapter. There is no
+second scheduler in this repository. One central concurrency group cancels the
+previous batch, and Infra reports failed cases and links prior closed issues.
+The archived Panopticon manifest/pinned-peer smoke is superseded by the central
+moving-TEST-channel and service-contract checks.
 Pull requests use the separate package and contract checks.
 
 `tests/test_legacy_library_sync.py` keeps eight cases against the frozen
