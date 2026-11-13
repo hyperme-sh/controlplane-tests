@@ -2,7 +2,7 @@
 
 Admission for this repository uses release line **0.2**. That value is
 `release-policy.json` `"line"` and the `release-line` input of
-`.github/workflows/release-admission.yml` and `.github/workflows/release.yml`.
+`.github/workflows/release-admission.yml` and `.github/workflows/release-admission.yml`.
 Packages that share a release line share major and minor versions. Patch
 numbers advance independently and keep the accepted API contract for that
 version. The package version in `pyproject.toml` is `0.2.0`. Installing these
