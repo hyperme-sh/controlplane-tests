@@ -158,7 +158,10 @@ This repository checks the helpers themselves in
 PostgreSQL 17 (`postgres:17` digest-pinned in the workflow), export
 `TEST_DATABASE_URL` as
 `postgresql+psycopg://postgres:package-test-only@127.0.0.1:<port>/postgres`,
-and run `bash scripts/check-package.sh` with uv 0.11.26 and Python 3.13. On a
+and run `bash scripts/check-package.sh` with uv 0.11.26 and Python 3.13.
+Qualification uses fresh home, cache and project environments without inherited
+credentials, forwarding only the disposable database URL. Reports stay in the
+job; no Actions artifacts are uploaded. On a
 public repository those jobs use `ubuntu-24.04`. The workflow file selects the
 self-hosted `linux`, `x64`, and `debrunner` labels when the repository is
 private.
