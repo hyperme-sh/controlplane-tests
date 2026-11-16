@@ -1,0 +1,1 @@
+Installed dependency legal texts are indexed during preparation. Exact-version psycopg supplements preserve the GPL text referenced by LGPL terms. No third-party source archives are fetched or bundled.

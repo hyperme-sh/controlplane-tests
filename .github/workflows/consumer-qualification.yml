@@ -20,6 +20,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      - name: Prepare job-local package output
+        run: echo "RELEASE_ARTIFACT_DIR=$(mktemp -d "$RUNNER_TEMP/tests-dist.XXXXXX")" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -31,6 +33,17 @@ jobs:
       - name: Qualify fixture package without inherited credentials
         run: >-
           bash scripts/anonymous-command.sh env
-          TEST_DATABASE_URL="$TEST_DATABASE_URL" bash scripts/check-package.sh
+          TEST_DATABASE_URL="$TEST_DATABASE_URL"
+          RELEASE_ARTIFACT_DIR="$RELEASE_ARTIFACT_DIR" bash scripts/check-package.sh
         env:
           TEST_DATABASE_URL: postgresql+psycopg://postgres:package-test-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+      - name: Prepare and inspect GHCR consumer image
+        run: >-
+          bash scripts/anonymous-command.sh env
+          QUALIFIED_DIST_DIR="$RELEASE_ARTIFACT_DIR"
+          GITHUB_SHA="$GITHUB_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID"
+          GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          bash scripts/check-container.sh
+      - name: Remove job-local package output
+        if: always()
+        run: rm -rf -- "$RELEASE_ARTIFACT_DIR"

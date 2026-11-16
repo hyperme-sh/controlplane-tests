@@ -1,0 +1,25 @@
+# Only qualified wheel bytes and hashed registry requirements enter this context.
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72 AS build
+WORKDIR /build
+RUN pip install --no-cache-dir uv==0.11.26
+COPY requirements.txt ./
+RUN uv venv /opt/tests && uv pip sync --python /opt/tests/bin/python --require-hashes requirements.txt
+COPY *.whl ./
+RUN uv pip install --python /opt/tests/bin/python --no-deps ./*.whl && uv pip check --python /opt/tests/bin/python
+COPY licenses/ ./licenses/
+COPY prepare_notices.py ./
+RUN /opt/tests/bin/python -I prepare_notices.py /opt/notices licenses
+
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+COPY --from=build /opt/tests /opt/tests
+COPY --from=build /opt/notices /usr/share/doc/controlplane-tests/third-party
+COPY LICENSE NOTICE /usr/share/doc/controlplane-tests/
+ENV PATH=/opt/tests/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ARG SOURCE_SHA
+ARG WHEEL_SHA256
+LABEL org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/hyperme-sh/controlplane-tests" \
+      org.opencontainers.image.revision=${SOURCE_SHA} \
+      sh.hyperme.qualified-wheel-sha256=${WHEEL_SHA256}
+USER 65532:65532
+CMD ["/opt/tests/bin/python", "-I", "-c", "import importlib.metadata as m; print('controlplane-tests ' + m.version('spanopticon-tests') + ': shared library; supply a consumer command')"]
