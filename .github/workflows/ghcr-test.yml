@@ -1,0 +1,105 @@
+name: GHCR TEST publication
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ghcr-tests-runtime-test
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.repository == 'hyperme-sh/controlplane-tests' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1
+        env:
+          POSTGRES_PASSWORD: package-test-only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Prepare build-local package output
+        run: echo "RELEASE_ARTIFACT_DIR=$(mktemp -d "$RUNNER_TEMP/tests-dist.XXXXXX")" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: false
+          version: '0.11.26'
+          python-version: '3.13'
+      - name: Qualify public dependencies without inherited credentials
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:package-test-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+        run: >-
+          bash scripts/anonymous-command.sh env
+          TEST_DATABASE_URL="$TEST_DATABASE_URL"
+          RELEASE_ARTIFACT_DIR="$RELEASE_ARTIFACT_DIR" bash scripts/check-package.sh
+      - name: Prepare and inspect GHCR consumer image
+        run: >-
+          bash scripts/anonymous-command.sh env
+          QUALIFIED_DIST_DIR="$RELEASE_ARTIFACT_DIR"
+          GITHUB_SHA="$GITHUB_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID"
+          GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          QUALIFIED_IMAGE_OUTPUT="$RELEASE_ARTIFACT_DIR/image.json"
+          bash scripts/check-container.sh
+      - name: Publish qualified current main to moving TEST
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(python3 - <<'PYTHON'
+          import json, os, urllib.request
+          class NoRedirects(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  raise ValueError('Authenticated main-ref redirects are refused')
+          request = urllib.request.Request('https://api.github.com/repos/hyperme-sh/controlplane-tests/git/ref/heads/main',
+              headers={'Authorization': 'Bearer ' + os.environ['GHCR_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          with urllib.request.build_opener(NoRedirects()).open(request, timeout=30) as response:
+              print(json.load(response)['object']['sha'])
+          PYTHON
+          )
+          if [[ "$current" != "$GITHUB_SHA" ]]; then
+            echo 'Newer main exists; skip stale TEST publication'
+            exit 0
+          fi
+          export DOCKER_CONFIG="$RELEASE_ARTIFACT_DIR/docker-auth"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+          image_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_id"])' "$RELEASE_ARTIFACT_DIR/image.json")
+          python3 scripts/publish_container.py --revision "$GITHUB_SHA" --image-id "$image_id" --channel test --publish
+      - name: Review retained registry versions after publication
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REQUIRE_REGISTRY_INVENTORY=1 python3 scripts/inventory_registry.py "$RELEASE_ARTIFACT_DIR/registry-output"
+          python3 -c 'import json,sys; rows=dict(line.rstrip().split("=",1) for line in open(sys.argv[1])); print("\n".join(r["digest"] for r in json.loads(rows["matrix"])["include"]))' "$RELEASE_ARTIFACT_DIR/registry-output" > "$RELEASE_ARTIFACT_DIR/digests"
+          while IFS= read -r digest; do
+            [[ -z "$digest" ]] || HISTORICAL_REPOSITORY=hyperme-sh/controlplane-tests/runtime bash scripts/check-older-image.sh "$digest"
+          done < "$RELEASE_ARTIFACT_DIR/digests"
+      - name: Remove qualified local image
+        if: always()
+        run: |
+          if [[ -f "$RELEASE_ARTIFACT_DIR/image.json" ]]; then
+            image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$RELEASE_ARTIFACT_DIR/image.json")
+            docker image rm "$image" || true
+          fi
+      - name: Remove build-local package output
+        if: always()
+        run: rm -rf -- "$RELEASE_ARTIFACT_DIR"
